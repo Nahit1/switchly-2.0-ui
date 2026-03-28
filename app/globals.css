@@ -1,26 +1,130 @@
 @import "tailwindcss";
 
+/* Class-based dark mode for Tailwind v4 */
+@variant dark (&:where(.dark, .dark *));
+
+/* ── Dark theme (default) ── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #0a0f1e;
+  --fg: #e2e8f0;
+  --text-primary: #ffffff;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --text-faint: #475569;
+  --card-bg: rgba(15, 23, 42, 0.8);
+  --card-border: rgba(124, 58, 237, 0.2);
+  --input-bg: rgba(30, 41, 59, 0.6);
+  --input-bg-focus: rgba(30, 41, 59, 0.9);
+  --input-border: rgba(71, 85, 105, 0.6);
+  --input-color: #e2e8f0;
+  --input-placeholder: #475569;
+  --divider: rgba(51, 65, 85, 0.6);
+  --blob1: rgba(124, 58, 237, 0.15);
+  --blob2: rgba(59, 130, 246, 0.1);
+  /* ── Sidebar / page ── */
+  --sidebar-bg: #080c18;
+  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-item-bg: rgba(255, 255, 255, 0.04);
+  --page-bg: #0a0f1e;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ── Light theme ── */
+:root[data-theme="light"] {
+  --bg: #f1f5f9;
+  --fg: #0f172a;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+  --card-bg: rgba(255, 255, 255, 0.95);
+  --card-border: rgba(124, 58, 237, 0.2);
+  --input-bg: rgba(241, 245, 249, 0.9);
+  --input-bg-focus: #ffffff;
+  --input-border: rgba(148, 163, 184, 0.7);
+  --input-color: #0f172a;
+  --input-placeholder: #94a3b8;
+  --divider: rgba(203, 213, 225, 0.8);
+  --blob1: rgba(124, 58, 237, 0.07);
+  --blob2: rgba(59, 130, 246, 0.05);
+  /* ── Sidebar / page ── */
+  --sidebar-bg: #ffffff;
+  --sidebar-border: rgba(0, 0, 0, 0.07);
+  --sidebar-item-bg: rgba(0, 0, 0, 0.03);
+  --page-bg: #f1f5f9;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #7c3aed; }
+
+/* ── Auth background ── */
+.auth-bg {
+  background:
+    radial-gradient(ellipse at 20% 50%, var(--blob1) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, var(--blob2) 0%, transparent 50%),
+    var(--bg);
+  transition: background 0.4s ease;
+}
+
+/* ── Glass card ── */
+.glass-card {
+  background: var(--card-bg);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--card-border);
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+
+/* ── Input ── */
+.input-field {
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--input-color);
+  transition: all 0.2s ease;
+}
+.input-field:focus {
+  outline: none;
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.15);
+  background: var(--input-bg-focus);
+}
+.input-field::placeholder {
+  color: var(--input-placeholder);
+}
+
+/* ── Primary button ── */
+.btn-primary {
+  background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+.btn-primary::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.btn-primary:hover::before { opacity: 1; }
+.btn-primary:active { transform: scale(0.98); }
+
+/* ── Switch track (logo gradient) ── */
+.switch-track {
+  background: linear-gradient(90deg, #7c3aed, #3b82f6);
+}
+
+/* ── Divider ── */
+.auth-divider {
+  background: var(--divider);
 }
