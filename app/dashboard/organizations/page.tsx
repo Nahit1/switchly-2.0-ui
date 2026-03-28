@@ -474,7 +474,7 @@ export default function OrganizationsPage() {
                       className="text-sm mt-0.5"
                       style={{ color: "var(--text-muted)" }}
                     >
-                      Devam etmek için en az bir organizasyon gerekli.
+                      Devam etmek için en az bir organizasyon gerekli..
                     </p>
                   </>
                 ) : (
