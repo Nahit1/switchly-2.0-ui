@@ -1,0 +1,9 @@
+services:
+  switchly-ui:
+    build: .
+    container_name: switchly-ui
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://46.62.219.92:8080
+    restart: unless-stopped
