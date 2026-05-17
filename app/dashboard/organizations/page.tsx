@@ -305,7 +305,7 @@ export default function OrganizationsPage() {
                 {/* Public Key row */}
                 <div className="mb-4">
                   <p
-                    className="text-[10px] font-semibold uppercase tracking-widest mb-1.5"
+                    className="text-[11px] font-semibold uppercase tracking-widest mb-1.5"
                     style={{ color: "var(--text-faint)" }}
                   >
                     Public Key

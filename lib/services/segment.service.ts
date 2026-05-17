@@ -4,6 +4,7 @@ import type {
   SegmentRuleListResponse,
   SegmentServiceResponse,
   CreateSegmentRuleBody,
+  LogicalOperator,
 } from "@/lib/types/segment";
 
 export const segmentService = {
@@ -23,13 +24,15 @@ export const segmentService = {
     organizationId: string,
     key: string,
     name: string,
-    description?: string | null
+    description?: string | null,
+    logicalOperator: LogicalOperator = 1
   ): Promise<SegmentServiceResponse> {
     return api.post<SegmentServiceResponse>("/api/segments", {
       organizationId,
       key,
       name,
       description: description ?? null,
+      logicalOperator,
     });
   },
 
@@ -40,6 +43,18 @@ export const segmentService = {
     return api.post<SegmentServiceResponse>(
       `/api/segments/${segmentGroupId}/rules`,
       body
+    );
+  },
+
+  removeGroup(segmentGroupId: string): Promise<SegmentServiceResponse> {
+    return api.delete<SegmentServiceResponse>(
+      `/api/segments/${segmentGroupId}`
+    );
+  },
+
+  removeRule(ruleId: string): Promise<SegmentServiceResponse> {
+    return api.delete<SegmentServiceResponse>(
+      `/api/segments/rules/${ruleId}`
     );
   },
 };

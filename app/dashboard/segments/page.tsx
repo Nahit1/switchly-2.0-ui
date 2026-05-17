@@ -19,10 +19,7 @@ const OPERATORS = [
   { value: "NotContains", label: "İçermez" },
   { value: "StartsWith", label: "İle Başlar" },
   { value: "EndsWith", label: "İle Biter" },
-  { value: "GreaterThan", label: "Büyüktür (>)" },
-  { value: "LessThan", label: "Küçüktür (<)" },
-  { value: "GreaterThanOrEqual", label: "Büyük Eşittir (≥)" },
-  { value: "LessThanOrEqual", label: "Küçük Eşittir (≤)" },
+  { value: "In", label: "Liste ',' ile ayır" },
 ];
 
 const VALUE_TYPES: { value: SegmentValueType; label: string }[] = [
@@ -61,6 +58,7 @@ interface CreateGroupModal {
   key: string;
   name: string;
   description: string;
+  logicalOperator: 1 | 2; // And=1, Or=2 (Not MVP'de yok)
 }
 
 const CLOSED_GROUP_MODAL: CreateGroupModal = {
@@ -70,6 +68,7 @@ const CLOSED_GROUP_MODAL: CreateGroupModal = {
   key: "",
   name: "",
   description: "",
+  logicalOperator: 1,
 };
 
 /* ── Create Rule Modal State ──────────────────────────────────── */
@@ -237,19 +236,24 @@ export default function SegmentsPage() {
     if (!selectedOrgId) return;
     setGroupModal((m) => ({ ...m, saving: true, error: "" }));
     try {
-      await segmentService.createGroup(
+      const res = await segmentService.createGroup(
         selectedOrgId,
         groupModal.key.trim(),
         groupModal.name.trim(),
-        groupModal.description.trim() || null
+        groupModal.description.trim() || null,
+        groupModal.logicalOperator
       );
+      // Backend response shape: { success, message, data: <guid> }
+      const realId = (res?.data as string | undefined) ?? crypto.randomUUID();
+
       /* append to local segments state */
       const newGroup: SegmentGroupDto = {
-        id: crypto.randomUUID(),
+        id: realId,
         key: groupModal.key.trim(),
         name: groupModal.name.trim(),
         description: groupModal.description.trim() || undefined,
         organizationId: selectedOrgId,
+        logicalOperator: groupModal.logicalOperator,
         segmentRules: [],
       };
       setSegments((prev) => [...prev, newGroup]);
@@ -292,6 +296,82 @@ export default function SegmentsPage() {
         saving: false,
         error: e instanceof Error ? e.message : "Bir hata oluştu.",
       }));
+    }
+  }
+
+  /* ── Remove group ──────────────────────────────────────────── */
+  async function handleRemoveGroup(groupId: string, groupName: string) {
+    if (!groupId) return;
+    if (
+      !window.confirm(
+        `"${groupName}" segment grubu silinsin mi? Bu işlem geri alınamaz.`
+      )
+    )
+      return;
+
+    try {
+      await segmentService.removeGroup(groupId);
+      setSegments((prev) =>
+        prev.filter((g) => (g.id ?? g["Id"]) !== groupId)
+      );
+      setGroupRulesCache((prev) => {
+        const next = { ...prev };
+        delete next[groupId];
+        return next;
+      });
+      setExpandedGroupIds((prev) => {
+        const next = new Set(prev);
+        next.delete(groupId);
+        return next;
+      });
+      if (selectedGroupId === groupId) {
+        setSelectedGroupId("");
+        setRules([]);
+      }
+    } catch (e: unknown) {
+      window.alert(
+        e instanceof Error ? e.message : "Segment grubu silinemedi."
+      );
+    }
+  }
+
+  /* ── Remove rule ───────────────────────────────────────────── */
+  async function handleRemoveRule(
+    ruleId: string,
+    groupId: string,
+    traitKey: string
+  ) {
+    if (!ruleId) return;
+    if (
+      !window.confirm(
+        `"${traitKey}" kuralı silinsin mi? Bu işlem geri alınamaz.`
+      )
+    )
+      return;
+
+    try {
+      await segmentService.removeRule(ruleId);
+      // Update rules tab list
+      setRules((prev) =>
+        prev.filter((r) => (r.id ?? (r as { Id?: string })["Id"]) !== ruleId)
+      );
+      // Update expanded group cache
+      if (groupId) {
+        setGroupRulesCache((prev) => {
+          const cached = prev[groupId];
+          if (!cached) return prev;
+          return {
+            ...prev,
+            [groupId]: cached.filter(
+              (r) => (r.id ?? (r as { Id?: string })["Id"]) !== ruleId
+            ),
+          };
+        });
+      }
+    } catch (e: unknown) {
+      window.alert(
+        e instanceof Error ? e.message : "Kural silinemedi."
+      );
     }
   }
 
@@ -638,6 +718,31 @@ export default function SegmentsPage() {
                           />
                         </svg>
                       </button>
+                      {/* Remove group button */}
+                      <button
+                        onClick={() => handleRemoveGroup(gId, gName)}
+                        title="Segment grubunu sil"
+                        className="flex items-center justify-center w-8 h-8 rounded-lg transition-all"
+                        style={{
+                          background: "rgba(239,68,68,0.10)",
+                          color: "#f87171",
+                          border: "1px solid rgba(239,68,68,0.25)",
+                        }}
+                      >
+                        <svg
+                          className="w-4 h-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"
+                          />
+                        </svg>
+                      </button>
                     </div>
                   </div>
 
@@ -766,6 +871,40 @@ export default function SegmentsPage() {
                                   >
                                     {valueTypeLabel(rValueType)}
                                   </span>
+                                  {/* Remove rule */}
+                                  {rule.id && (
+                                    <button
+                                      onClick={() =>
+                                        handleRemoveRule(
+                                          rule.id as string,
+                                          gId,
+                                          rTraitKey
+                                        )
+                                      }
+                                      title="Kuralı sil"
+                                      className="flex items-center justify-center w-6 h-6 rounded-md transition-all"
+                                      style={{
+                                        background: "rgba(239,68,68,0.10)",
+                                        color: "#f87171",
+                                        border:
+                                          "1px solid rgba(239,68,68,0.25)",
+                                      }}
+                                    >
+                                      <svg
+                                        className="w-3.5 h-3.5"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        viewBox="0 0 24 24"
+                                      >
+                                        <path
+                                          strokeLinecap="round"
+                                          strokeLinejoin="round"
+                                          strokeWidth={2}
+                                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"
+                                        />
+                                      </svg>
+                                    </button>
+                                  )}
                                 </div>
                               );
                             })}
@@ -1112,6 +1251,39 @@ export default function SegmentsPage() {
                           —
                         </span>
                       )}
+                      {/* Remove rule */}
+                      {rId && (
+                        <button
+                          onClick={() =>
+                            handleRemoveRule(
+                              rId as string,
+                              selectedGroupId,
+                              rTraitKey
+                            )
+                          }
+                          title="Kuralı sil"
+                          className="flex items-center justify-center w-8 h-8 rounded-lg transition-all flex-shrink-0"
+                          style={{
+                            background: "rgba(239,68,68,0.10)",
+                            color: "#f87171",
+                            border: "1px solid rgba(239,68,68,0.25)",
+                          }}
+                        >
+                          <svg
+                            className="w-4 h-4"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"
+                            />
+                          </svg>
+                        </button>
+                      )}
                     </div>
                   );
                 })
@@ -1281,6 +1453,58 @@ export default function SegmentsPage() {
                     color: "var(--text-primary)",
                   }}
                 />
+              </div>
+
+              {/* Logical Operator (AND / OR) */}
+              <div>
+                <label
+                  className="block text-xs font-semibold mb-1.5 uppercase tracking-wide"
+                  style={{ color: "var(--text-faint)" }}
+                >
+                  Kuralları nasıl birleştir?
+                </label>
+                <div className="flex gap-2">
+                  {[
+                    {
+                      value: 1 as const,
+                      label: "AND",
+                      desc: "hepsi eşleşmeli",
+                    },
+                    { value: 2 as const, label: "OR", desc: "biri yeter" },
+                  ].map((op) => {
+                    const active = groupModal.logicalOperator === op.value;
+                    return (
+                      <button
+                        key={op.value}
+                        type="button"
+                        onClick={() =>
+                          setGroupModal((m) => ({
+                            ...m,
+                            logicalOperator: op.value,
+                          }))
+                        }
+                        className="flex-1 px-3 py-2 rounded-xl text-sm font-semibold transition-all"
+                        style={{
+                          background: active
+                            ? "rgba(124,58,237,0.15)"
+                            : "var(--sidebar-item-bg)",
+                          color: active ? "#a78bfa" : "var(--text-muted)",
+                          border: active
+                            ? "1px solid rgba(124,58,237,0.4)"
+                            : "1px solid transparent",
+                        }}
+                      >
+                        <div>{op.label}</div>
+                        <div
+                          className="text-[11px] font-normal opacity-70"
+                          style={{ color: "var(--text-muted)" }}
+                        >
+                          {op.desc}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Error */}

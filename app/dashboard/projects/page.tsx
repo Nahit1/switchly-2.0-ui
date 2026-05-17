@@ -22,19 +22,19 @@ const ENV_COLORS = [
   { bg: "rgba(236,72,153,0.15)",  color: "#ec4899" },
 ];
 
-/* ── DataType badge helpers ────────────────────────────────────── */
+/* ── DataType badge helpers (C# enum: String=1, Number=2, Boolean=3, Json=4) ── */
 function dtLabel(dt?: ProjectSettingDataType): string {
-  if (dt === 0 || dt === "String")  return "STR";
-  if (dt === 1 || dt === "Number")  return "NUM";
-  if (dt === 2 || dt === "Boolean") return "BOOL";
-  if (dt === 3 || dt === "Json")    return "JSON";
+  if (dt === 1 || dt === "String")  return "STR";
+  if (dt === 2 || dt === "Number")  return "NUM";
+  if (dt === 3 || dt === "Boolean") return "BOOL";
+  if (dt === 4 || dt === "Json")    return "JSON";
   return String(dt ?? "?");
 }
 function dtStyle(dt?: ProjectSettingDataType): React.CSSProperties {
-  if (dt === 0 || dt === "String")  return { background: "rgba(59,130,246,0.15)",  color: "#3b82f6" };
-  if (dt === 1 || dt === "Number")  return { background: "rgba(16,185,129,0.15)",  color: "#10b981" };
-  if (dt === 2 || dt === "Boolean") return { background: "rgba(249,115,22,0.15)",  color: "#f97316" };
-  if (dt === 3 || dt === "Json")    return { background: "rgba(168,85,247,0.15)",  color: "#a855f7" };
+  if (dt === 1 || dt === "String")  return { background: "rgba(59,130,246,0.15)",  color: "#3b82f6" };
+  if (dt === 2 || dt === "Number")  return { background: "rgba(16,185,129,0.15)",  color: "#10b981" };
+  if (dt === 3 || dt === "Boolean") return { background: "rgba(249,115,22,0.15)",  color: "#f97316" };
+  if (dt === 4 || dt === "Json")    return { background: "rgba(168,85,247,0.15)",  color: "#a855f7" };
   return { background: "rgba(100,116,139,0.15)", color: "#64748b" };
 }
 
@@ -281,7 +281,7 @@ export default function ProjectsPage() {
                   }}
                 >
                   <span
-                    className="w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold text-white flex-shrink-0"
+                    className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0"
                     style={{ background: active ? "#7c3aed" : "#475569" }}
                   >
                     {getInitials(org.name)}
@@ -538,7 +538,7 @@ export default function ProjectsPage() {
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                               </svg>
-                              <p className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "var(--text-faint)" }}>
+                              <p className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: "var(--text-faint)" }}>
                                 Settings
                               </p>
                             </div>
@@ -566,7 +566,7 @@ export default function ProjectsPage() {
                                   const settingId   = (setting.id   ?? setting["Id"])          as string | undefined;
                                   const settingKey  = (setting.key  ?? setting["Key"])          as string | undefined;
                                   const settingDesc = (setting.description ?? setting["Description"]) as string | undefined;
-                                  const dataType    = (setting.dataType  ?? setting["DataType"])  as string | number | undefined;
+                                  const dataType    = (setting.dataType  ?? setting["DataType"])  as ProjectSettingDataType | undefined;
                                   const isSecret    = (setting.isSecret  ?? setting["IsSecret"])  as boolean | undefined;
                                   const valObj      = (setting.value ?? setting["Value"]) as { value?: string | null } | null | undefined;
                                   const rawValue    = valObj?.value ?? (valObj as Record<string, unknown>)?.["Value"] as string | null | undefined;
@@ -586,18 +586,18 @@ export default function ProjectsPage() {
                                             <span className="text-xs font-mono font-bold" style={{ color: "var(--text-primary)" }}>
                                               {settingKey ?? "—"}
                                             </span>
-                                            <span className="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase leading-none" style={dtStyle(dataType)}>
+                                            <span className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase leading-none" style={dtStyle(dataType)}>
                                               {dtLabel(dataType)}
                                             </span>
                                             {isSecret && (
-                                              <span className="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase leading-none"
+                                              <span className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase leading-none"
                                                 style={{ background: "rgba(251,191,36,0.15)", color: "#f59e0b" }}>
                                                 secret
                                               </span>
                                             )}
                                           </div>
                                           {settingDesc && (
-                                            <p className="text-[10px] mt-0.5 leading-relaxed" style={{ color: "var(--text-faint)" }}>
+                                            <p className="text-[11px] mt-0.5 leading-relaxed" style={{ color: "var(--text-faint)" }}>
                                               {settingDesc}
                                             </p>
                                           )}

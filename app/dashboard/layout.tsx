@@ -63,7 +63,6 @@ const navItems = [
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
       </svg>
     ),
-    soon: true,
   },
 ];
 
@@ -159,14 +158,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-        <p className="px-3 mb-2 text-[11px] font-semibold uppercase tracking-widest" style={{ color: "var(--text-faint)" }}>
+        <p className="px-3 mb-2 text-[12px] font-semibold uppercase tracking-widest" style={{ color: "var(--text-faint)" }}>
           Menü
         </p>
         {navItems.map((item) => {
           const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(item.href));
           // Lock all nav items except organizations when no org
-          const locked = !hasOrg && item.href !== ORG_PAGE;
-          const disabled = item.soon || locked;
+          const disabled = !hasOrg && item.href !== ORG_PAGE;
 
           return (
             <Link
@@ -186,11 +184,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             >
               <span style={{ color: active ? "#a78bfa" : "var(--text-muted)" }}>{item.icon}</span>
               <span className="flex-1">{item.label}</span>
-              {item.soon && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium" style={{ background: "rgba(124,58,237,0.15)", color: "#a78bfa" }}>
-                  Yakında
-                </span>
-              )}
               {active && !disabled && (
                 <span className="w-1.5 h-1.5 rounded-full bg-violet-400" />
               )}

@@ -3,6 +3,11 @@
 /* Class-based dark mode for Tailwind v4 */
 @variant dark (&:where(.dark, .dark *));
 
+/* Bump root font-size — tüm rem-based Tailwind utility'leri ölçekler */
+html {
+  font-size: 17.5px;
+}
+
 /* ── Dark theme (default) ── */
 :root {
   --bg: #0a0f1e;

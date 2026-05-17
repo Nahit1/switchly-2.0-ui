@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { organizationService } from "@/lib/services/organization.service";
 import { projectService } from "@/lib/services/project.service";
 import { featureFlagService } from "@/lib/services/feature-flag.service";
@@ -14,6 +14,11 @@ import type {
   SegmentGroupsDto,
   FeatureFlagType,
   RolloutKind,
+  VariantInput,
+  VariantWeightDto,
+  FlagExposureStatsDto,
+  FlagConversionStatsDto,
+  VariantConversionStatsDto,
 } from "@/lib/types/feature-flag";
 import type { SegmentGroupDto } from "@/lib/types/segment";
 
@@ -185,6 +190,9 @@ interface AssignSegmentModal {
   segments: SegmentGroupDto[];
   segmentsLoading: boolean;
   selectedGroupId: string;
+  rolloutKind: RolloutKind;
+  rolloutPct: number;
+  priority: number;
 }
 const CLOSED_ASSIGN_MODAL: AssignSegmentModal = {
   open: false,
@@ -195,7 +203,168 @@ const CLOSED_ASSIGN_MODAL: AssignSegmentModal = {
   segments: [],
   segmentsLoading: false,
   selectedGroupId: "",
+  rolloutKind: 1,
+  rolloutPct: 100,
+  priority: 0,
 };
+
+/* ── Weights Modal state (env veya targeting scope'unda) ────────── */
+interface WeightsModal {
+  open: boolean;
+  scope: "env" | "targeting";
+  ownerId: string;        // envId or targetingId
+  ownerLabel: string;     // header'da gösterilecek (env adı / targeting key)
+  flagKey: string;
+  variants: GetFlagVariantDto[];
+  weights: Record<string, number>;   // variantId -> weight
+  saving: boolean;
+  error: string;
+}
+
+const CLOSED_WEIGHTS_MODAL: WeightsModal = {
+  open: false,
+  scope: "env",
+  ownerId: "",
+  ownerLabel: "",
+  flagKey: "",
+  variants: [],
+  weights: {},
+  saving: false,
+  error: "",
+};
+
+/* ── Variant Edit/Add Modal state ───────────────────────────────── */
+interface VariantEditModal {
+  open: boolean;
+  mode: "add" | "edit";
+  flagId: string;
+  flagKey: string;
+  variantId: string;     // edit'te dolu, add'de boş
+  key: string;
+  name: string;
+  payloadJson: string;
+  saving: boolean;
+  error: string;
+}
+
+const CLOSED_VARIANT_MODAL: VariantEditModal = {
+  open: false,
+  mode: "add",
+  flagId: "",
+  flagKey: "",
+  variantId: "",
+  key: "",
+  name: "",
+  payloadJson: "",
+  saving: false,
+  error: "",
+};
+
+/* ── Targeting Edit Modal state ─────────────────────────────────── */
+interface EditTargetingModal {
+  open: boolean;
+  targetingId: string;
+  segmentName: string;
+  rolloutKind: RolloutKind;
+  rolloutPct: number;
+  priority: number;
+  isEnabled: boolean;
+  saving: boolean;
+  error: string;
+}
+const CLOSED_EDIT_TARGETING_MODAL: EditTargetingModal = {
+  open: false,
+  targetingId: "",
+  segmentName: "",
+  rolloutKind: 1,
+  rolloutPct: 100,
+  priority: 0,
+  isEnabled: true,
+  saving: false,
+  error: "",
+};
+
+/* ── Analytics Modal state (exposure + conversion stats per flag) ─ */
+type AnalyticsRange = "1h" | "24h" | "7d" | "30d";
+type AnalyticsView = "exposure" | "conversion";
+
+interface AnalyticsModal {
+  open: boolean;
+  flagId: string;
+  flagKey: string;
+  view: AnalyticsView;
+  rangeKey: AnalyticsRange;
+  eventName: string;                          // conversion sekmesi için
+  loading: boolean;
+  error: string;
+  exposureData: FlagExposureStatsDto | null;
+  conversionData: FlagConversionStatsDto | null;
+}
+
+const CLOSED_ANALYTICS_MODAL: AnalyticsModal = {
+  open: false,
+  flagId: "",
+  flagKey: "",
+  view: "exposure",
+  rangeKey: "24h",
+  eventName: "checkout_completed",
+  loading: false,
+  error: "",
+  exposureData: null,
+  conversionData: null,
+};
+
+function rangeToSinceIso(range: AnalyticsRange): string {
+  const now = Date.now();
+  const ms: Record<AnalyticsRange, number> = {
+    "1h": 60 * 60 * 1000,
+    "24h": 24 * 60 * 60 * 1000,
+    "7d": 7 * 24 * 60 * 60 * 1000,
+    "30d": 30 * 24 * 60 * 60 * 1000,
+  };
+  return new Date(now - ms[range]).toISOString();
+}
+
+function rangeLabel(range: AnalyticsRange): string {
+  if (range === "1h") return "Son 1s";
+  if (range === "24h") return "Son 24s";
+  if (range === "7d") return "Son 7g";
+  return "Son 30g";
+}
+
+// "Off"/"on"/variant key — outcome row için human label.
+function outcomeLabel(variantKey: string | null | undefined, isOn: boolean): string {
+  if (variantKey) return variantKey;
+  return isOn ? "on" : "off";
+}
+
+/* ── Conversion stats helpers ─────────────────────────────────── */
+function conversionRate(v: VariantConversionStatsDto): number {
+  return v.exposedUsers > 0 ? v.convertedUsers / v.exposedUsers : 0;
+}
+
+function avgValuePerConverter(v: VariantConversionStatsDto): number {
+  return v.convertedUsers > 0
+    ? Number(v.totalValue) / v.convertedUsers
+    : 0;
+}
+
+// Baseline: outcome label alfabetik küçük (deterministik). Lift bunun üzerinden hesaplanır.
+function pickBaseline(
+  variants: VariantConversionStatsDto[]
+): VariantConversionStatsDto | null {
+  if (variants.length === 0) return null;
+  return [...variants].sort((a, b) => {
+    const ak = outcomeLabel(a.variantKey, a.isOn);
+    const bk = outcomeLabel(b.variantKey, b.isOn);
+    return ak.localeCompare(bk);
+  })[0];
+}
+
+function liftPercent(rate: number, baselineRate: number): number | null {
+  if (baselineRate <= 0) return null;
+  return ((rate - baselineRate) / baselineRate) * 100;
+}
 
 /* ════════════════════════════════════════════════════════════════ */
 export default function FlagsPage() {
@@ -230,12 +399,31 @@ export default function FlagsPage() {
   const [assignModal, setAssignModal] =
     useState<AssignSegmentModal>(CLOSED_ASSIGN_MODAL);
 
+  const [editTargetingModal, setEditTargetingModal] =
+    useState<EditTargetingModal>(CLOSED_EDIT_TARGETING_MODAL);
+
+  /* ── Variant add/edit modal ─────────────────────────────── */
+  const [variantModal, setVariantModal] =
+    useState<VariantEditModal>(CLOSED_VARIANT_MODAL);
+
+  /* ── Weights modal (env / targeting) ────────────────────── */
+  const [weightsModal, setWeightsModal] =
+    useState<WeightsModal>(CLOSED_WEIGHTS_MODAL);
+
+  /* ── Analytics modal (exposure stats) ───────────────────── */
+  const [analyticsModal, setAnalyticsModal] =
+    useState<AnalyticsModal>(CLOSED_ANALYTICS_MODAL);
+
   /* ── Create modal ──────────────────────────────────────── */
   const [modalOpen, setModalOpen] = useState(false);
   const [newKey, setNewKey] = useState("");
   const [newName, setNewName] = useState("");
   const [newDescription, setNewDescription] = useState("");
   const [newType, setNewType] = useState<FeatureFlagType>(1);
+  const [newVariants, setNewVariants] = useState<VariantInput[]>([
+    { key: "control", name: "" },
+    { key: "treatment", name: "" },
+  ]);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
 
@@ -494,7 +682,10 @@ export default function FlagsPage() {
     try {
       await featureFlagService.assignSegment(
         assignModal.featureFlagEnvId,
-        assignModal.selectedGroupId
+        assignModal.selectedGroupId,
+        assignModal.rolloutKind,
+        assignModal.rolloutPct,
+        assignModal.priority
       );
       setAssignModal(CLOSED_ASSIGN_MODAL);
       // Flagleri yenile
@@ -514,6 +705,309 @@ export default function FlagsPage() {
     }
   }
 
+  /* ═══ submit edit targeting ══════════════════════════════ */
+  async function handleEditTargeting() {
+    if (!editTargetingModal.targetingId) return;
+    setEditTargetingModal((p) => ({ ...p, saving: true, error: "" }));
+    try {
+      await featureFlagService.updateTargeting(
+        editTargetingModal.targetingId,
+        editTargetingModal.rolloutKind,
+        editTargetingModal.rolloutPct,
+        editTargetingModal.priority,
+        editTargetingModal.isEnabled
+      );
+      setEditTargetingModal(CLOSED_EDIT_TARGETING_MODAL);
+      if (selectedOrgId && selectedProjectId) {
+        const res = await featureFlagService.getByProject(
+          selectedOrgId,
+          selectedProjectId
+        );
+        setFlags(res.data ?? []);
+      }
+    } catch (err: unknown) {
+      setEditTargetingModal((p) => ({
+        ...p,
+        saving: false,
+        error: err instanceof Error ? err.message : "Targeting güncellenemedi.",
+      }));
+    }
+  }
+
+  /* ═══ remove segment from flag ═════════════════════════════ */
+  async function handleRemoveTargeting(targetingId: string, segmentName: string) {
+    if (!targetingId) return;
+    if (
+      !window.confirm(
+        `"${segmentName}" segment'i bu flag'den kaldırılsın mı?`
+      )
+    )
+      return;
+
+    try {
+      await featureFlagService.removeTargeting(targetingId);
+      if (selectedOrgId && selectedProjectId) {
+        const res = await featureFlagService.getByProject(
+          selectedOrgId,
+          selectedProjectId
+        );
+        setFlags(res.data ?? []);
+      }
+    } catch (err: unknown) {
+      window.alert(
+        err instanceof Error ? err.message : "Segment kaldırılamadı."
+      );
+    }
+  }
+
+  /* ═══ refresh flag list (helper) ═══════════════════════════ */
+  async function refreshFlags() {
+    if (!selectedOrgId || !selectedProjectId) return;
+    const res = await featureFlagService.getByProject(
+      selectedOrgId,
+      selectedProjectId
+    );
+    setFlags(res.data ?? []);
+  }
+
+  /* ═══ open variant add/edit modal ══════════════════════════ */
+  function openAddVariantModal(flagId: string, flagKey: string) {
+    setVariantModal({
+      ...CLOSED_VARIANT_MODAL,
+      open: true,
+      mode: "add",
+      flagId,
+      flagKey,
+    });
+  }
+
+  function openEditVariantModal(
+    flagId: string,
+    flagKey: string,
+    variant: GetFlagVariantDto
+  ) {
+    setVariantModal({
+      open: true,
+      mode: "edit",
+      flagId,
+      flagKey,
+      variantId: (variant.id ?? (variant["Id"] as string)) ?? "",
+      key: (variant.key ?? (variant["Key"] as string)) ?? "",
+      name: (variant.name ?? (variant["Name"] as string)) ?? "",
+      payloadJson:
+        (variant.payloadJson ?? (variant["PayloadJson"] as string)) ?? "",
+      saving: false,
+      error: "",
+    });
+  }
+
+  /* ═══ submit variant add/edit ═════════════════════════════ */
+  async function handleVariantSave() {
+    setVariantModal((p) => ({ ...p, saving: true, error: "" }));
+    try {
+      if (variantModal.mode === "add") {
+        if (!variantModal.key.trim()) {
+          setVariantModal((p) => ({
+            ...p,
+            saving: false,
+            error: "Key boş olamaz.",
+          }));
+          return;
+        }
+        await featureFlagService.addVariant(
+          variantModal.flagId,
+          variantModal.key.trim(),
+          variantModal.name.trim() || undefined,
+          variantModal.payloadJson.trim() || undefined
+        );
+      } else {
+        await featureFlagService.updateVariant(
+          variantModal.variantId,
+          variantModal.name.trim() || undefined,
+          variantModal.payloadJson.trim() || undefined
+        );
+      }
+      setVariantModal(CLOSED_VARIANT_MODAL);
+      await refreshFlags();
+    } catch (err: unknown) {
+      setVariantModal((p) => ({
+        ...p,
+        saving: false,
+        error: err instanceof Error ? err.message : "Variant kaydedilemedi.",
+      }));
+    }
+  }
+
+  /* ═══ open weights modal (env / targeting) ════════════════ */
+  function openWeightsModal(
+    scope: "env" | "targeting",
+    ownerId: string,
+    ownerLabel: string,
+    flagKey: string,
+    variants: GetFlagVariantDto[],
+    currentWeights: VariantWeightDto[]
+  ) {
+    // Variantları sortOrder'a göre sırala (yoksa 0 say); UI bucket order'ı bunu yansıtır.
+    const sortedVariants = [...variants].sort((a, b) => {
+      const ao = (a.sortOrder ?? (a["SortOrder"] as number) ?? 0) as number;
+      const bo = (b.sortOrder ?? (b["SortOrder"] as number) ?? 0) as number;
+      return ao - bo;
+    });
+
+    const weights: Record<string, number> = {};
+    sortedVariants.forEach((v) => {
+      const id = (v.id ?? (v["Id"] as string)) ?? "";
+      if (id) weights[id] = 0;
+    });
+    currentWeights.forEach((w) => {
+      const id = w.variantId ?? (w["VariantId"] as string);
+      const wt = w.weight ?? (w["Weight"] as number);
+      if (id && weights[id] !== undefined) weights[id] = Number(wt) || 0;
+    });
+
+    setWeightsModal({
+      open: true,
+      scope,
+      ownerId,
+      ownerLabel,
+      flagKey,
+      variants: sortedVariants,
+      weights,
+      saving: false,
+      error: "",
+    });
+  }
+
+  function updateWeightInput(variantId: string, raw: string) {
+    const num = Math.max(0, Math.min(100, parseInt(raw, 10) || 0));
+    setWeightsModal((p) => ({
+      ...p,
+      weights: { ...p.weights, [variantId]: num },
+    }));
+  }
+
+  /* ═══ submit weights ══════════════════════════════════════ */
+  async function handleWeightsSave() {
+    const total = Object.values(weightsModal.weights).reduce(
+      (acc, w) => acc + w,
+      0
+    );
+    if (total !== 100) {
+      setWeightsModal((p) => ({
+        ...p,
+        error: `Weight toplamı 100 olmalı, şu an ${total}.`,
+      }));
+      return;
+    }
+
+    setWeightsModal((p) => ({ ...p, saving: true, error: "" }));
+    try {
+      const payload = Object.entries(weightsModal.weights).map(
+        ([variantId, weight]) => ({ variantId, weight })
+      );
+      if (weightsModal.scope === "env") {
+        await featureFlagService.setEnvVariantWeights(
+          weightsModal.ownerId,
+          payload
+        );
+      } else {
+        await featureFlagService.setTargetingVariantWeights(
+          weightsModal.ownerId,
+          payload
+        );
+      }
+      setWeightsModal(CLOSED_WEIGHTS_MODAL);
+      await refreshFlags();
+    } catch (err: unknown) {
+      setWeightsModal((p) => ({
+        ...p,
+        saving: false,
+        error: err instanceof Error ? err.message : "Weight kaydedilemedi.",
+      }));
+    }
+  }
+
+  /* ═══ open analytics modal + fetch ═══════════════════════ */
+  async function openAnalyticsModal(flagId: string, flagKey: string) {
+    setAnalyticsModal({
+      ...CLOSED_ANALYTICS_MODAL,
+      open: true,
+      flagId,
+      flagKey,
+      view: "exposure",
+      rangeKey: "24h",
+      loading: true,
+    });
+    await fetchAnalytics(flagId, "exposure", "24h", "checkout_completed");
+  }
+
+  async function fetchAnalytics(
+    flagId: string,
+    view: AnalyticsView,
+    range: AnalyticsRange,
+    eventName: string
+  ) {
+    setAnalyticsModal((p) => ({
+      ...p,
+      loading: true,
+      error: "",
+      view,
+      rangeKey: range,
+      eventName,
+    }));
+    try {
+      if (view === "exposure") {
+        const res = await featureFlagService.getExposureStats(
+          flagId,
+          rangeToSinceIso(range)
+        );
+        setAnalyticsModal((p) => ({
+          ...p,
+          loading: false,
+          exposureData: res.data ?? null,
+          error: res.success ? "" : res.message ?? "Bir hata oluştu.",
+        }));
+      } else {
+        const res = await featureFlagService.getConversionStats(
+          flagId,
+          eventName,
+          rangeToSinceIso(range)
+        );
+        setAnalyticsModal((p) => ({
+          ...p,
+          loading: false,
+          conversionData: res.data ?? null,
+          error: res.success ? "" : res.message ?? "Bir hata oluştu.",
+        }));
+      }
+    } catch (err: unknown) {
+      setAnalyticsModal((p) => ({
+        ...p,
+        loading: false,
+        error:
+          err instanceof Error ? err.message : "Analytics çekilemedi.",
+      }));
+    }
+  }
+
+  /* ═══ delete variant ══════════════════════════════════════ */
+  async function handleDeleteVariant(variantId: string, variantKey: string) {
+    if (!variantId) return;
+    if (
+      !window.confirm(
+        `"${variantKey}" variant'ı silinsin mi? Bağlı weight kayıtları da düşer; kalan variant'ların weight'lerini yeniden set etmen gerekebilir.`
+      )
+    )
+      return;
+
+    try {
+      await featureFlagService.deleteVariant(variantId);
+      await refreshFlags();
+    } catch (err: unknown) {
+      window.alert(err instanceof Error ? err.message : "Variant silinemedi.");
+    }
+  }
+
   /* ═══ create flag ════════════════════════════════════════ */
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -524,6 +1018,32 @@ export default function FlagsPage() {
       !selectedProjectId
     )
       return;
+
+    const isMulti = newType === 2 || newType === "Multivariant";
+    let variantsPayload: VariantInput[] | undefined;
+
+    if (isMulti) {
+      const trimmed = newVariants.map((v) => ({
+        key: v.key.trim(),
+        name: v.name?.trim() || undefined,
+        payloadJson: v.payloadJson?.trim() || undefined,
+      }));
+      if (trimmed.length < 2) {
+        setCreateError("Multivariant flag için en az 2 variant gerekli.");
+        return;
+      }
+      if (trimmed.some((v) => !v.key)) {
+        setCreateError("Variant key'leri boş olamaz.");
+        return;
+      }
+      const lowered = trimmed.map((v) => v.key.toLowerCase());
+      if (new Set(lowered).size !== lowered.length) {
+        setCreateError("Variant key'leri benzersiz olmalı.");
+        return;
+      }
+      variantsPayload = trimmed;
+    }
+
     setCreating(true);
     setCreateError("");
     try {
@@ -533,7 +1053,8 @@ export default function FlagsPage() {
         newKey.trim(),
         newName.trim(),
         newDescription.trim(),
-        newType
+        newType,
+        variantsPayload
       );
       setModalOpen(false);
       resetModal();
@@ -554,7 +1075,44 @@ export default function FlagsPage() {
     setNewName("");
     setNewDescription("");
     setNewType(1);
+    setNewVariants([
+      { key: "control", name: "" },
+      { key: "treatment", name: "" },
+    ]);
     setCreateError("");
+  }
+
+  function updateVariantField(
+    idx: number,
+    field: keyof VariantInput,
+    value: string
+  ) {
+    setNewVariants((prev) =>
+      prev.map((v, i) =>
+        i === idx
+          ? {
+              ...v,
+              [field]:
+                field === "key"
+                  ? value
+                      .toLowerCase()
+                      .replace(/\s+/g, "_")
+                      .replace(/[^a-z0-9_-]/g, "")
+                  : value,
+            }
+          : v
+      )
+    );
+  }
+
+  function addVariantRow() {
+    setNewVariants((prev) => [...prev, { key: "", name: "" }]);
+  }
+
+  function removeVariantRow(idx: number) {
+    setNewVariants((prev) =>
+      prev.length <= 2 ? prev : prev.filter((_, i) => i !== idx)
+    );
   }
 
   function openModal() {
@@ -681,7 +1239,7 @@ export default function FlagsPage() {
                     }}
                   >
                     <span
-                      className="w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold text-white flex-shrink-0"
+                      className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0"
                       style={{ background: active ? "#7c3aed" : "#475569" }}
                     >
                       {getInitials(org.name)}
@@ -760,7 +1318,7 @@ export default function FlagsPage() {
                       }}
                     >
                       <span
-                        className="w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold text-white flex-shrink-0"
+                        className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0"
                         style={{ background: active ? "#7c3aed" : "#475569" }}
                       >
                         {getInitials(pname)}
@@ -957,7 +1515,7 @@ export default function FlagsPage() {
                             {flagKey ?? "—"}
                           </span>
                           <span
-                            className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase leading-none"
+                            className="text-[11px] px-1.5 py-0.5 rounded font-bold uppercase leading-none"
                             style={flagTypeStyle(flagType)}
                           >
                             {flagTypeLabel(flagType)}
@@ -1020,7 +1578,7 @@ export default function FlagsPage() {
                             return (
                               <span
                                 key={ei}
-                                className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium"
+                                className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
                                 style={{
                                   background: isEnabled
                                     ? "rgba(16,185,129,0.12)"
@@ -1049,6 +1607,34 @@ export default function FlagsPage() {
                           })
                         )}
                       </div>
+                      {/* Analytics */}
+                      <button
+                        onClick={() =>
+                          openAnalyticsModal(flagId, flagKey ?? "")
+                        }
+                        className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium transition-all hover:opacity-80 flex-shrink-0"
+                        style={{
+                          background: "rgba(59,130,246,0.1)",
+                          color: "#60a5fa",
+                        }}
+                        title="Exposure analytics"
+                      >
+                        <svg
+                          className="w-3 h-3"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2.5}
+                            d="M9 19V9m6 10V5m-12 14h18"
+                          />
+                        </svg>
+                        Analytics
+                      </button>
+
                       {/* Ayrıntılar */}
                       <button
                         onClick={() => toggleExpand(flagId)}
@@ -1088,7 +1674,7 @@ export default function FlagsPage() {
                         {/* Environments */}
                         <div className="p-5">
                           <p
-                            className="text-[10px] font-semibold uppercase tracking-widest mb-3"
+                            className="text-[11px] font-semibold uppercase tracking-widest mb-3"
                             style={{ color: "var(--text-faint)" }}
                           >
                             Environments
@@ -1119,6 +1705,9 @@ export default function FlagsPage() {
                                 const segGroups = (env.segmentGroups ??
                                   env["SegmentGroups"] ??
                                   []) as SegmentGroupsDto[];
+                                const envWeights = (env.variantWeights ??
+                                  env["VariantWeights"] ??
+                                  []) as VariantWeightDto[];
                                 const featureFlagEnvId =
                                   (env.featureFlagEnvironmentId ??
                                     env["FeatureFlagEnvironmentId"]) as string;
@@ -1159,7 +1748,7 @@ export default function FlagsPage() {
                                       {/* Badges */}
                                       <div className="flex items-center gap-2 ml-1 flex-1 flex-wrap">
                                         <span
-                                          className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase"
+                                          className="text-[11px] px-1.5 py-0.5 rounded font-bold uppercase"
                                           style={{
                                             background: isEnabled
                                               ? "rgba(16,185,129,0.15)"
@@ -1328,8 +1917,101 @@ export default function FlagsPage() {
                                             />
                                           </svg>
                                         </button>
+
+                                        {/* Variant weights button — only Multivariant */}
+                                        {isMulti && (
+                                          <button
+                                            onClick={() =>
+                                              openWeightsModal(
+                                                "env",
+                                                featureFlagEnvId,
+                                                envName ?? `Env ${ei + 1}`,
+                                                flagKey ?? "",
+                                                varList,
+                                                envWeights
+                                              )
+                                            }
+                                            title="Variant Weights"
+                                            className="w-7 h-7 rounded-lg flex items-center justify-center transition-all hover:opacity-80"
+                                            style={{
+                                              background: "rgba(168,85,247,0.12)",
+                                              color: "#a855f7",
+                                            }}
+                                          >
+                                            <svg
+                                              className="w-3.5 h-3.5"
+                                              fill="none"
+                                              stroke="currentColor"
+                                              viewBox="0 0 24 24"
+                                            >
+                                              <path
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                                strokeWidth={2}
+                                                d="M3 12h4l3-9 4 18 3-9h4"
+                                              />
+                                            </svg>
+                                          </button>
+                                        )}
                                       </div>
                                     </div>
+
+                                    {/* Env-level variant weights distribution bar (Multivariant only) */}
+                                    {isMulti && varList.length > 0 && (
+                                      <div className="px-4 pt-3">
+                                        <div
+                                          className="flex items-center gap-2 mb-1.5"
+                                          style={{ color: "var(--text-faint)" }}
+                                        >
+                                          <span className="text-[11px] font-semibold uppercase tracking-widest">
+                                            Default split
+                                          </span>
+                                          {envWeights.length === 0 && (
+                                            <span
+                                              className="text-[11px]"
+                                              style={{ color: "#f59e0b" }}
+                                            >
+                                              · weight set edilmemiş
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div
+                                          className="flex w-full h-2 rounded-full overflow-hidden"
+                                          style={{
+                                            background: "var(--input-bg)",
+                                            border: "1px solid var(--input-border)",
+                                          }}
+                                        >
+                                          {varList.map((v, vi) => {
+                                            const vId = (v.id ?? v["Id"]) as string | undefined;
+                                            const w = envWeights.find(
+                                              (x) =>
+                                                (x.variantId ??
+                                                  (x["VariantId"] as string)) === vId
+                                            );
+                                            const pct =
+                                              (w?.weight ?? (w?.["Weight"] as number) ?? 0) as number;
+                                            if (pct <= 0) return null;
+                                            return (
+                                              <div
+                                                key={vi}
+                                                title={`${
+                                                  v.key ?? v["Key"]
+                                                }: ${pct}%`}
+                                                style={{
+                                                  width: `${pct}%`,
+                                                  background: `hsl(${
+                                                    VARIANT_HUES[
+                                                      vi % VARIANT_HUES.length
+                                                    ]
+                                                  },65%,55%)`,
+                                                }}
+                                              />
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                    )}
 
                                     {/* Segment groups */}
                                     {segGroups.length > 0 && (
@@ -1368,7 +2050,7 @@ export default function FlagsPage() {
                                                 </span>
                                                 {sgKey && sgName && (
                                                   <span
-                                                    className="text-[10px] font-mono"
+                                                    className="text-[11px] font-mono"
                                                     style={{
                                                       color:
                                                         "var(--text-faint)",
@@ -1377,45 +2059,189 @@ export default function FlagsPage() {
                                                     {sgKey}
                                                   </span>
                                                 )}
+                                                {/* Rollout badge */}
+                                                <span
+                                                  className="text-[11px] px-1.5 py-0.5 rounded font-semibold"
+                                                  style={{
+                                                    background:
+                                                      "rgba(124,58,237,0.15)",
+                                                    color: "#a78bfa",
+                                                  }}
+                                                >
+                                                  {rolloutKindLabel(
+                                                    sg.rolloutKind
+                                                  )}
+                                                  {(sg.rolloutKind === 2 ||
+                                                    sg.rolloutKind ===
+                                                      "Percentage") &&
+                                                    ` ${sg.rolloutPercentage ?? 0}%`}
+                                                </span>
+                                                {/* Priority badge */}
+                                                {(sg.priority ?? 0) > 0 && (
+                                                  <span
+                                                    className="text-[11px] px-1.5 py-0.5 rounded"
+                                                    style={{
+                                                      background:
+                                                        "var(--input-bg)",
+                                                      color: "var(--text-muted)",
+                                                    }}
+                                                  >
+                                                    P{sg.priority}
+                                                  </span>
+                                                )}
+                                                {/* IsEnabled / disabled badge */}
+                                                {sg.isEnabled === false && (
+                                                  <span
+                                                    className="text-[11px] px-1.5 py-0.5 rounded font-semibold"
+                                                    style={{
+                                                      background:
+                                                        "rgba(239,68,68,0.12)",
+                                                      color: "#f87171",
+                                                    }}
+                                                  >
+                                                    DISABLED
+                                                  </span>
+                                                )}
+                                                {/* Edit button — sağa yapıştır */}
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    sg.id &&
+                                                    setEditTargetingModal({
+                                                      open: true,
+                                                      targetingId: sg.id,
+                                                      segmentName:
+                                                        sgName ??
+                                                        sgKey ??
+                                                        "Segment",
+                                                      rolloutKind:
+                                                        (sg.rolloutKind ??
+                                                          1) as RolloutKind,
+                                                      rolloutPct:
+                                                        sg.rolloutPercentage ??
+                                                        100,
+                                                      priority: sg.priority ?? 0,
+                                                      isEnabled:
+                                                        sg.isEnabled ?? true,
+                                                      saving: false,
+                                                      error: "",
+                                                    })
+                                                  }
+                                                  className="ml-auto text-[11px] px-2 py-0.5 rounded transition-colors"
+                                                  style={{
+                                                    background:
+                                                      "var(--input-bg)",
+                                                    color: "var(--text-muted)",
+                                                    border:
+                                                      "1px solid var(--input-border)",
+                                                  }}
+                                                >
+                                                  Düzenle
+                                                </button>
+                                                {/* Weights button — only Multivariant */}
+                                                {isMulti && (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      if (!sg.id) return;
+                                                      const tWeights = (sg.variantWeights ??
+                                                        sg["VariantWeights"] ??
+                                                        []) as VariantWeightDto[];
+                                                      openWeightsModal(
+                                                        "targeting",
+                                                        sg.id,
+                                                        sgName ?? sgKey ?? "Targeting",
+                                                        flagKey ?? "",
+                                                        varList,
+                                                        tWeights
+                                                      );
+                                                    }}
+                                                    className="text-[11px] px-2 py-0.5 rounded transition-colors"
+                                                    style={{
+                                                      background:
+                                                        "rgba(168,85,247,0.12)",
+                                                      color: "#a855f7",
+                                                      border:
+                                                        "1px solid rgba(168,85,247,0.25)",
+                                                    }}
+                                                  >
+                                                    Weights
+                                                  </button>
+                                                )}
+                                                {/* Remove button */}
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    sg.id &&
+                                                    handleRemoveTargeting(
+                                                      sg.id,
+                                                      sgName ??
+                                                        sgKey ??
+                                                        "Segment"
+                                                    )
+                                                  }
+                                                  className="text-[11px] px-2 py-0.5 rounded transition-colors"
+                                                  style={{
+                                                    background:
+                                                      "rgba(239,68,68,0.10)",
+                                                    color: "#f87171",
+                                                    border:
+                                                      "1px solid rgba(239,68,68,0.25)",
+                                                  }}
+                                                >
+                                                  Kaldır
+                                                </button>
                                               </div>
                                               {sgRules.length > 0 && (
-                                                <div className="flex flex-wrap gap-1.5">
+                                                <div className="flex flex-wrap items-center gap-1.5">
                                                   {sgRules.map((rule, ri) => (
-                                                    <span
-                                                      key={ri}
-                                                      className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded font-mono"
-                                                      style={{
-                                                        background:
-                                                          "var(--input-bg)",
-                                                        color:
-                                                          "var(--text-secondary)",
-                                                        border:
-                                                          "1px solid var(--input-border)",
-                                                      }}
-                                                    >
+                                                    <Fragment key={ri}>
+                                                      {ri > 0 && (
+                                                        <span
+                                                          className="text-[11px] font-bold px-1"
+                                                          style={{ color: "#a78bfa" }}
+                                                        >
+                                                          {sg.logicalOperator === 2 ||
+                                                          sg.logicalOperator === "Or"
+                                                            ? "OR"
+                                                            : "AND"}
+                                                        </span>
+                                                      )}
                                                       <span
+                                                        className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded font-mono"
                                                         style={{
+                                                          background:
+                                                            "var(--input-bg)",
                                                           color:
-                                                            "var(--text-primary)",
+                                                            "var(--text-secondary)",
+                                                          border:
+                                                            "1px solid var(--input-border)",
                                                         }}
                                                       >
-                                                        {rule.traitKey ?? "?"}
+                                                        <span
+                                                          style={{
+                                                            color:
+                                                              "var(--text-primary)",
+                                                          }}
+                                                        >
+                                                          {rule.traitKey ?? "?"}
+                                                        </span>
+                                                        <span
+                                                          style={{
+                                                            color: "#a78bfa",
+                                                          }}
+                                                        >
+                                                          {rule.operator ?? "="}
+                                                        </span>
+                                                        <span
+                                                          style={{
+                                                            color: "#10b981",
+                                                          }}
+                                                        >
+                                                          {rule.value ?? "?"}
+                                                        </span>
                                                       </span>
-                                                      <span
-                                                        style={{
-                                                          color: "#a78bfa",
-                                                        }}
-                                                      >
-                                                        {rule.operator ?? "="}
-                                                      </span>
-                                                      <span
-                                                        style={{
-                                                          color: "#10b981",
-                                                        }}
-                                                      >
-                                                        {rule.value ?? "?"}
-                                                      </span>
-                                                    </span>
+                                                    </Fragment>
                                                   ))}
                                                 </div>
                                               )}
@@ -1438,12 +2264,28 @@ export default function FlagsPage() {
                               className="pt-4"
                               style={{ borderTop: "1px solid var(--divider)" }}
                             >
-                              <p
-                                className="text-[10px] font-semibold uppercase tracking-widest mb-3"
-                                style={{ color: "var(--text-faint)" }}
-                              >
-                                Variants
-                              </p>
+                              <div className="flex items-center justify-between mb-3">
+                                <p
+                                  className="text-[11px] font-semibold uppercase tracking-widest"
+                                  style={{ color: "var(--text-faint)" }}
+                                >
+                                  Variants
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    openAddVariantModal(flagId, flagKey ?? "")
+                                  }
+                                  className="text-[12px] font-semibold px-2.5 py-1 rounded-lg"
+                                  style={{
+                                    background: "rgba(168,85,247,0.12)",
+                                    color: "#a855f7",
+                                    border: "1px solid rgba(168,85,247,0.25)",
+                                  }}
+                                >
+                                  + Variant
+                                </button>
+                              </div>
                               {varList.length === 0 ? (
                                 <p
                                   className="text-xs"
@@ -1462,10 +2304,13 @@ export default function FlagsPage() {
                                       | undefined;
                                     const vPayload = (v.payloadJson ??
                                       v["PayloadJson"]) as string | undefined;
+                                    const vId = (v.id ?? v["Id"]) as
+                                      | string
+                                      | undefined;
                                     return (
                                       <div
                                         key={vi}
-                                        className="flex items-center gap-2.5 rounded-xl px-3 py-2"
+                                        className="group flex items-center gap-2.5 rounded-xl px-3 py-2"
                                         style={{
                                           background: "var(--input-bg)",
                                           border:
@@ -1493,7 +2338,7 @@ export default function FlagsPage() {
                                           </p>
                                           {vName && (
                                             <p
-                                              className="text-[10px]"
+                                              className="text-[11px]"
                                               style={{
                                                 color: "var(--text-faint)",
                                               }}
@@ -1504,7 +2349,7 @@ export default function FlagsPage() {
                                         </div>
                                         {vPayload && (
                                           <span
-                                            className="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold"
+                                            className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold"
                                             style={{
                                               background:
                                                 "rgba(168,85,247,0.12)",
@@ -1512,10 +2357,79 @@ export default function FlagsPage() {
                                               border:
                                                 "1px solid rgba(168,85,247,0.2)",
                                             }}
+                                            title="Payload var"
                                           >
                                             JSON
                                           </span>
                                         )}
+                                        <div className="flex items-center gap-1 ml-1">
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              openEditVariantModal(
+                                                flagId,
+                                                flagKey ?? "",
+                                                v
+                                              )
+                                            }
+                                            aria-label="Variant düzenle"
+                                            className="w-6 h-6 flex items-center justify-center rounded-md opacity-60 hover:opacity-100 transition-opacity"
+                                            style={{
+                                              background: "var(--input-bg)",
+                                              color: "var(--text-muted)",
+                                              border:
+                                                "1px solid var(--input-border)",
+                                            }}
+                                          >
+                                            <svg
+                                              className="w-3 h-3"
+                                              fill="none"
+                                              stroke="currentColor"
+                                              viewBox="0 0 24 24"
+                                            >
+                                              <path
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                                strokeWidth={2}
+                                                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                                              />
+                                            </svg>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              vId &&
+                                              handleDeleteVariant(
+                                                vId,
+                                                vKey ?? ""
+                                              )
+                                            }
+                                            aria-label="Variant sil"
+                                            disabled={varList.length <= 2}
+                                            className="w-6 h-6 flex items-center justify-center rounded-md opacity-60 hover:opacity-100 transition-opacity disabled:opacity-20 disabled:cursor-not-allowed"
+                                            style={{
+                                              background:
+                                                "rgba(239,68,68,0.10)",
+                                              color: "#f87171",
+                                              border:
+                                                "1px solid rgba(239,68,68,0.25)",
+                                            }}
+                                          >
+                                            <svg
+                                              className="w-3 h-3"
+                                              fill="none"
+                                              stroke="currentColor"
+                                              viewBox="0 0 24 24"
+                                            >
+                                              <path
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                                strokeWidth={2}
+                                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3"
+                                              />
+                                            </svg>
+                                          </button>
+                                        </div>
                                       </div>
                                     );
                                   })}
@@ -1681,7 +2595,7 @@ export default function FlagsPage() {
                           {rk.label}
                         </p>
                         <p
-                          className="text-[10px] leading-tight"
+                          className="text-[11px] leading-tight"
                           style={{
                             color: active
                               ? "rgba(167,139,250,0.7)"
@@ -1986,6 +2900,99 @@ export default function FlagsPage() {
               </div>
             )}
 
+            {/* Rollout controls — sadece segment seçilince görünür */}
+            {assignModal.selectedGroupId && (
+              <div className="mt-5 space-y-3">
+                <p
+                  className="text-xs font-semibold uppercase tracking-wider"
+                  style={{ color: "var(--text-faint)" }}
+                >
+                  Rollout
+                </p>
+
+                {/* RolloutKind selector */}
+                <div className="flex gap-2">
+                  {ROLLOUT_KINDS.map((rk) => {
+                    const active = assignModal.rolloutKind === rk.value;
+                    return (
+                      <button
+                        key={rk.value}
+                        type="button"
+                        onClick={() =>
+                          setAssignModal((p) => ({ ...p, rolloutKind: rk.value }))
+                        }
+                        className="flex-1 px-3 py-2 rounded-lg text-xs font-semibold transition-all"
+                        style={{
+                          background: active
+                            ? "rgba(124,58,237,0.15)"
+                            : "var(--sidebar-item-bg)",
+                          color: active ? "#a78bfa" : "var(--text-muted)",
+                          border: active
+                            ? "1px solid rgba(124,58,237,0.4)"
+                            : "1px solid transparent",
+                        }}
+                      >
+                        {rk.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Percentage — sadece Percentage seçili ise */}
+                {(assignModal.rolloutKind === 2 ||
+                  assignModal.rolloutKind === "Percentage") && (
+                  <div>
+                    <label
+                      className="block text-xs mb-1.5"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Yüzde: {assignModal.rolloutPct}%
+                    </label>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={assignModal.rolloutPct}
+                      onChange={(e) =>
+                        setAssignModal((p) => ({
+                          ...p,
+                          rolloutPct: Number(e.target.value),
+                        }))
+                      }
+                      className="w-full"
+                    />
+                  </div>
+                )}
+
+                {/* Priority */}
+                <div>
+                  <label
+                    className="block text-xs mb-1.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    Öncelik (yüksek olan önce değerlendirilir)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={assignModal.priority}
+                    onChange={(e) =>
+                      setAssignModal((p) => ({
+                        ...p,
+                        priority: Number(e.target.value) || 0,
+                      }))
+                    }
+                    className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                    style={{
+                      background: "var(--sidebar-item-bg)",
+                      border: "1px solid var(--sidebar-border)",
+                      color: "var(--text-primary)",
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Error */}
             {assignModal.error && (
               <div
@@ -2060,6 +3067,191 @@ export default function FlagsPage() {
                   "Segment Ata"
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ Edit Targeting Modal ══════════════════════════════ */}
+      {editTargetingModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() =>
+              !editTargetingModal.saving &&
+              setEditTargetingModal(CLOSED_EDIT_TARGETING_MODAL)
+            }
+          />
+          <div
+            className="relative w-full max-w-md rounded-2xl p-6 glass-card"
+            style={{ background: "var(--page-bg)" }}
+          >
+            <div className="mb-4">
+              <h3
+                className="text-lg font-bold"
+                style={{ color: "var(--text-primary)" }}
+              >
+                Targeting Düzenle
+              </h3>
+              <p
+                className="text-sm mt-1"
+                style={{ color: "var(--text-muted)" }}
+              >
+                <span className="font-mono">{editTargetingModal.segmentName}</span>
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              {/* RolloutKind */}
+              <div>
+                <label
+                  className="block text-xs font-semibold uppercase tracking-wider mb-2"
+                  style={{ color: "var(--text-faint)" }}
+                >
+                  Rollout
+                </label>
+                <div className="flex gap-2">
+                  {ROLLOUT_KINDS.map((rk) => {
+                    const active = editTargetingModal.rolloutKind === rk.value;
+                    return (
+                      <button
+                        key={rk.value}
+                        type="button"
+                        onClick={() =>
+                          setEditTargetingModal((p) => ({
+                            ...p,
+                            rolloutKind: rk.value,
+                          }))
+                        }
+                        className="flex-1 px-3 py-2 rounded-lg text-xs font-semibold transition-all"
+                        style={{
+                          background: active
+                            ? "rgba(124,58,237,0.15)"
+                            : "var(--sidebar-item-bg)",
+                          color: active ? "#a78bfa" : "var(--text-muted)",
+                          border: active
+                            ? "1px solid rgba(124,58,237,0.4)"
+                            : "1px solid transparent",
+                        }}
+                      >
+                        {rk.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Percentage */}
+              {(editTargetingModal.rolloutKind === 2 ||
+                editTargetingModal.rolloutKind === "Percentage") && (
+                <div>
+                  <label
+                    className="block text-xs mb-1.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    Yüzde: {editTargetingModal.rolloutPct}%
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={editTargetingModal.rolloutPct}
+                    onChange={(e) =>
+                      setEditTargetingModal((p) => ({
+                        ...p,
+                        rolloutPct: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full"
+                  />
+                </div>
+              )}
+
+              {/* Priority */}
+              <div>
+                <label
+                  className="block text-xs mb-1.5"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  Öncelik
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  value={editTargetingModal.priority}
+                  onChange={(e) =>
+                    setEditTargetingModal((p) => ({
+                      ...p,
+                      priority: Number(e.target.value) || 0,
+                    }))
+                  }
+                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                  style={{
+                    background: "var(--sidebar-item-bg)",
+                    border: "1px solid var(--sidebar-border)",
+                    color: "var(--text-primary)",
+                  }}
+                />
+              </div>
+
+              {/* IsEnabled */}
+              <label
+                className="flex items-center gap-2 text-sm cursor-pointer"
+                style={{ color: "var(--text-primary)" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={editTargetingModal.isEnabled}
+                  onChange={(e) =>
+                    setEditTargetingModal((p) => ({
+                      ...p,
+                      isEnabled: e.target.checked,
+                    }))
+                  }
+                />
+                Targeting aktif
+              </label>
+
+              {/* Error */}
+              {editTargetingModal.error && (
+                <div
+                  className="rounded-xl px-3 py-2.5 text-sm"
+                  style={{
+                    background: "rgba(239,68,68,0.1)",
+                    color: "#f87171",
+                    border: "1px solid rgba(239,68,68,0.2)",
+                  }}
+                >
+                  {editTargetingModal.error}
+                </div>
+              )}
+
+              {/* Buttons */}
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    !editTargetingModal.saving &&
+                    setEditTargetingModal(CLOSED_EDIT_TARGETING_MODAL)
+                  }
+                  disabled={editTargetingModal.saving}
+                  className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium"
+                  style={{
+                    background: "var(--sidebar-item-bg)",
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  İptal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleEditTargeting}
+                  disabled={editTargetingModal.saving}
+                  className="btn-primary flex-1 px-4 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-40"
+                >
+                  {editTargetingModal.saving ? "Kaydediliyor…" : "Kaydet"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -2173,7 +3365,7 @@ export default function FlagsPage() {
                             {ft.label}
                           </p>
                           <p
-                            className="text-[10px] mt-0.5 leading-tight"
+                            className="text-[11px] mt-0.5 leading-tight"
                             style={{
                               color: active
                                 ? `${ft.color}aa`
@@ -2258,6 +3450,109 @@ export default function FlagsPage() {
                   className="input-field w-full rounded-xl px-4 py-3 text-sm resize-none"
                 />
               </div>
+              {/* Variants — only for Multivariant */}
+              {(newType === 2 || newType === "Multivariant") && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label
+                      className="block text-sm font-medium"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      Variants <span className="text-red-400">*</span>
+                      <span
+                        className="ml-1.5 text-xs font-normal"
+                        style={{ color: "var(--text-faint)" }}
+                      >
+                        (en az 2; key benzersiz)
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={addVariantRow}
+                      className="text-xs font-semibold px-2.5 py-1 rounded-lg"
+                      style={{
+                        background: "rgba(168,85,247,0.12)",
+                        color: "#a855f7",
+                        border: "1px solid rgba(168,85,247,0.25)",
+                      }}
+                    >
+                      + Variant
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {newVariants.map((v, vi) => (
+                      <div
+                        key={vi}
+                        className="flex items-center gap-2 rounded-xl p-2.5"
+                        style={{
+                          background: "var(--input-bg)",
+                          border: "1px solid var(--input-border)",
+                        }}
+                      >
+                        <span
+                          className="w-2 h-2 rounded-full flex-shrink-0"
+                          style={{
+                            background: `hsl(${
+                              VARIANT_HUES[vi % VARIANT_HUES.length]
+                            },65%,55%)`,
+                          }}
+                        />
+                        <input
+                          type="text"
+                          value={v.key}
+                          onChange={(e) =>
+                            updateVariantField(vi, "key", e.target.value)
+                          }
+                          placeholder="key (örn. control)"
+                          className="input-field flex-1 min-w-0 rounded-lg px-2.5 py-1.5 text-xs font-mono"
+                        />
+                        <input
+                          type="text"
+                          value={v.name ?? ""}
+                          onChange={(e) =>
+                            updateVariantField(vi, "name", e.target.value)
+                          }
+                          placeholder="isim (opsiyonel)"
+                          className="input-field flex-1 min-w-0 rounded-lg px-2.5 py-1.5 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeVariantRow(vi)}
+                          disabled={newVariants.length <= 2}
+                          aria-label="Variant sil"
+                          className="w-7 h-7 flex items-center justify-center rounded-lg disabled:opacity-30 disabled:cursor-not-allowed"
+                          style={{
+                            background: "rgba(248,81,73,0.1)",
+                            color: "#f85149",
+                          }}
+                        >
+                          <svg
+                            className="w-3.5 h-3.5"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M6 18L18 6M6 6l12 12"
+                            />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <p
+                    className="text-[12px] mt-1"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    İlk variant default env&apos;de %100 weight alır. Diğer
+                    env&apos;lerin weight&apos;leri sonradan flag detayından
+                    set edilir.
+                  </p>
+                </div>
+              )}
               <div className="flex gap-3 pt-1">
                 <button
                   type="button"
@@ -2310,6 +3605,1108 @@ export default function FlagsPage() {
           </div>
         </div>
       )}
+
+      {/* ══ Variant Add/Edit Modal ════════════════════════════ */}
+      {variantModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setVariantModal(CLOSED_VARIANT_MODAL)}
+          />
+          <div className="relative glass-card rounded-2xl p-6 w-full max-w-md shadow-2xl shadow-black/50">
+            <div className="flex items-center justify-between mb-5">
+              <div>
+                <h2
+                  className="text-lg font-bold"
+                  style={{ color: "var(--text-primary)" }}
+                >
+                  {variantModal.mode === "add"
+                    ? "Variant Ekle"
+                    : "Variant Düzenle"}
+                </h2>
+                <p
+                  className="text-sm mt-0.5 font-mono"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  {variantModal.flagKey}
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Kapat"
+                onClick={() => setVariantModal(CLOSED_VARIANT_MODAL)}
+                className="w-8 h-8 flex items-center justify-center rounded-lg"
+                style={{
+                  background: "var(--input-bg)",
+                  color: "var(--text-muted)",
+                  border: "1px solid var(--input-border)",
+                }}
+              >
+                <svg
+                  className="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
+            </div>
+
+            {variantModal.error && (
+              <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2.5 mb-4">
+                <p className="text-red-400 text-sm">{variantModal.error}</p>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              {/* Key */}
+              <div className="space-y-1.5">
+                <label
+                  className="block text-sm font-medium"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  Key{" "}
+                  {variantModal.mode === "add" ? (
+                    <span className="text-red-400">*</span>
+                  ) : (
+                    <span
+                      className="ml-1.5 text-xs font-normal"
+                      style={{ color: "var(--text-faint)" }}
+                    >
+                      (değiştirilemez)
+                    </span>
+                  )}
+                </label>
+                <input
+                  type="text"
+                  value={variantModal.key}
+                  disabled={variantModal.mode === "edit"}
+                  onChange={(e) =>
+                    setVariantModal((p) => ({
+                      ...p,
+                      key: e.target.value
+                        .toLowerCase()
+                        .replace(/\s+/g, "_")
+                        .replace(/[^a-z0-9_-]/g, ""),
+                    }))
+                  }
+                  placeholder="örn. variant_b"
+                  className="input-field w-full rounded-xl px-4 py-3 text-sm font-mono disabled:opacity-60"
+                />
+              </div>
+
+              {/* Name */}
+              <div className="space-y-1.5">
+                <label
+                  className="block text-sm font-medium"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  İsim{" "}
+                  <span
+                    className="ml-1 text-xs font-normal"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    (opsiyonel)
+                  </span>
+                </label>
+                <input
+                  type="text"
+                  value={variantModal.name}
+                  onChange={(e) =>
+                    setVariantModal((p) => ({ ...p, name: e.target.value }))
+                  }
+                  placeholder="Örn: Yeni öneri algoritması"
+                  className="input-field w-full rounded-xl px-4 py-3 text-sm"
+                />
+              </div>
+
+              {/* Payload */}
+              <div className="space-y-1.5">
+                <label
+                  className="block text-sm font-medium"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  Payload JSON{" "}
+                  <span
+                    className="ml-1 text-xs font-normal"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    (opsiyonel)
+                  </span>
+                </label>
+                <textarea
+                  value={variantModal.payloadJson}
+                  onChange={(e) =>
+                    setVariantModal((p) => ({
+                      ...p,
+                      payloadJson: e.target.value,
+                    }))
+                  }
+                  placeholder={`{ "theme": "v2" }`}
+                  rows={3}
+                  className="input-field w-full rounded-xl px-4 py-3 text-xs font-mono resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 pt-5">
+              <button
+                type="button"
+                onClick={() => setVariantModal(CLOSED_VARIANT_MODAL)}
+                className="flex-1 py-2.5 rounded-xl text-sm font-medium"
+                style={{
+                  background: "var(--input-bg)",
+                  color: "var(--text-muted)",
+                  border: "1px solid var(--input-border)",
+                }}
+              >
+                İptal
+              </button>
+              <button
+                type="button"
+                onClick={handleVariantSave}
+                disabled={
+                  variantModal.saving ||
+                  (variantModal.mode === "add" && !variantModal.key.trim())
+                }
+                className="flex-1 btn-primary py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {variantModal.saving
+                  ? "Kaydediliyor…"
+                  : variantModal.mode === "add"
+                  ? "Ekle"
+                  : "Kaydet"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ Variant Weights Modal ═════════════════════════════ */}
+      {weightsModal.open && (() => {
+        const total = Object.values(weightsModal.weights).reduce(
+          (acc, w) => acc + w,
+          0
+        );
+        const sumOk = total === 100;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              onClick={() => setWeightsModal(CLOSED_WEIGHTS_MODAL)}
+            />
+            <div className="relative glass-card rounded-2xl p-6 w-full max-w-lg shadow-2xl shadow-black/50">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <h2
+                    className="text-lg font-bold"
+                    style={{ color: "var(--text-primary)" }}
+                  >
+                    Variant Weights
+                  </h2>
+                  <p
+                    className="text-sm mt-0.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    <span className="font-mono">{weightsModal.flagKey}</span>
+                    <span className="mx-1.5">·</span>
+                    <span style={{ color: "#a855f7" }}>
+                      {weightsModal.scope === "env"
+                        ? "env"
+                        : "targeting"}
+                    </span>
+                    <span className="mx-1.5">·</span>
+                    {weightsModal.ownerLabel}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  aria-label="Kapat"
+                  onClick={() => setWeightsModal(CLOSED_WEIGHTS_MODAL)}
+                  className="w-8 h-8 flex items-center justify-center rounded-lg"
+                  style={{
+                    background: "var(--input-bg)",
+                    color: "var(--text-muted)",
+                    border: "1px solid var(--input-border)",
+                  }}
+                >
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M6 18L18 6M6 6l12 12"
+                    />
+                  </svg>
+                </button>
+              </div>
+
+              <p
+                className="text-xs mb-5 leading-relaxed"
+                style={{ color: "var(--text-faint)" }}
+              >
+                {weightsModal.scope === "env"
+                  ? "Bu env'de hiçbir targeting eşleşmediğinde uygulanacak default dağılım."
+                  : "Bu targeting eşleştiğinde uygulanacak dağılım."}{" "}
+                Toplam <strong>100</strong> olmalı.
+              </p>
+
+              {weightsModal.error && (
+                <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2.5 mb-4">
+                  <p className="text-red-400 text-sm">{weightsModal.error}</p>
+                </div>
+              )}
+
+              {/* Variants list with weight input + bar */}
+              <div className="space-y-3 mb-5">
+                {weightsModal.variants.length === 0 ? (
+                  <p
+                    className="text-xs"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    Bu flag&apos;de variant yok. Önce variant ekle.
+                  </p>
+                ) : (
+                  weightsModal.variants.map((v, vi) => {
+                    const vId = (v.id ?? (v["Id"] as string)) ?? "";
+                    const vKey = (v.key ?? (v["Key"] as string)) ?? "—";
+                    const vName = (v.name ?? (v["Name"] as string)) ?? "";
+                    const weight = weightsModal.weights[vId] ?? 0;
+                    const hue = VARIANT_HUES[vi % VARIANT_HUES.length];
+                    return (
+                      <div key={vId || vi} className="space-y-1.5">
+                        <div className="flex items-center gap-3">
+                          <span
+                            className="w-2 h-2 rounded-full flex-shrink-0"
+                            style={{
+                              background: `hsl(${hue},65%,55%)`,
+                            }}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p
+                              className="text-xs font-mono font-bold"
+                              style={{ color: "var(--text-primary)" }}
+                            >
+                              {vKey}
+                            </p>
+                            {vName && (
+                              <p
+                                className="text-[11px] truncate"
+                                style={{ color: "var(--text-faint)" }}
+                              >
+                                {vName}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={weight}
+                              onChange={(e) =>
+                                updateWeightInput(vId, e.target.value)
+                              }
+                              className="input-field w-16 text-center rounded-lg px-2 py-1 text-sm font-mono"
+                            />
+                            <span
+                              className="text-xs font-semibold"
+                              style={{ color: "var(--text-muted)" }}
+                            >
+                              %
+                            </span>
+                          </div>
+                        </div>
+                        <div
+                          className="w-full h-1.5 rounded-full overflow-hidden"
+                          style={{
+                            background: "var(--input-bg)",
+                            border: "1px solid var(--input-border)",
+                          }}
+                        >
+                          <div
+                            className="h-full transition-all"
+                            style={{
+                              width: `${weight}%`,
+                              background: `hsl(${hue},65%,55%)`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Sum indicator */}
+              <div
+                className="flex items-center justify-between rounded-xl px-3 py-2.5 mb-5"
+                style={{
+                  background: sumOk
+                    ? "rgba(16,185,129,0.10)"
+                    : "rgba(245,158,11,0.10)",
+                  border: sumOk
+                    ? "1px solid rgba(16,185,129,0.25)"
+                    : "1px solid rgba(245,158,11,0.25)",
+                  color: sumOk ? "#10b981" : "#f59e0b",
+                }}
+              >
+                <span className="text-xs font-semibold">Toplam</span>
+                <span className="text-sm font-mono font-bold">
+                  {total} / 100
+                </span>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setWeightsModal(CLOSED_WEIGHTS_MODAL)}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-medium"
+                  style={{
+                    background: "var(--input-bg)",
+                    color: "var(--text-muted)",
+                    border: "1px solid var(--input-border)",
+                  }}
+                >
+                  İptal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleWeightsSave}
+                  disabled={
+                    weightsModal.saving ||
+                    !sumOk ||
+                    weightsModal.variants.length === 0
+                  }
+                  className="flex-1 btn-primary py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {weightsModal.saving ? "Kaydediliyor…" : "Kaydet"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ══════ Analytics Modal ══════ */}
+      {analyticsModal.open && (() => {
+        const exposureData = analyticsModal.exposureData;
+        const exposureVariants = exposureData?.variants ?? [];
+        const totalExposures = exposureData?.totalExposures ?? 0;
+        const ranges: AnalyticsRange[] = ["1h", "24h", "7d", "30d"];
+
+        const conversionData = analyticsModal.conversionData;
+        const conversionVariants = conversionData?.variants ?? [];
+        const baseline = pickBaseline(conversionVariants);
+        const baselineRate = baseline ? conversionRate(baseline) : 0;
+        const winner = conversionVariants.length > 0
+          ? [...conversionVariants].sort(
+              (a, b) => conversionRate(b) - conversionRate(a)
+            )[0]
+          : null;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div
+              className="absolute inset-0"
+              style={{ background: "rgba(0,0,0,0.6)" }}
+              onClick={() => setAnalyticsModal(CLOSED_ANALYTICS_MODAL)}
+            />
+            <div
+              className="relative w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden"
+              style={{
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--input-border)",
+              }}
+            >
+              {/* Header */}
+              <div
+                className="flex items-center justify-between px-6 py-4"
+                style={{ borderBottom: "1px solid var(--divider)" }}
+              >
+                <div className="flex items-center gap-3">
+                  <div
+                    className="w-9 h-9 rounded-xl flex items-center justify-center"
+                    style={{
+                      background: "rgba(59,130,246,0.15)",
+                      color: "#60a5fa",
+                    }}
+                  >
+                    <svg
+                      className="w-5 h-5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M9 19V9m6 10V5m-12 14h18"
+                      />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3
+                      className="text-sm font-bold"
+                      style={{ color: "var(--text-primary)" }}
+                    >
+                      Exposure Analytics
+                    </h3>
+                    <p
+                      className="text-xs font-mono"
+                      style={{ color: "var(--text-faint)" }}
+                    >
+                      {analyticsModal.flagKey}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAnalyticsModal(CLOSED_ANALYTICS_MODAL)}
+                  aria-label="Kapat"
+                  className="w-8 h-8 flex items-center justify-center rounded-lg"
+                  style={{
+                    background: "var(--input-bg)",
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Tab toggle */}
+              <div
+                className="flex gap-1 mx-6 mt-4 p-1 rounded-xl"
+                style={{
+                  background: "var(--input-bg)",
+                  border: "1px solid var(--input-border)",
+                }}
+              >
+                {(["exposure", "conversion"] as AnalyticsView[]).map((v) => {
+                  const active = analyticsModal.view === v;
+                  return (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() =>
+                        fetchAnalytics(
+                          analyticsModal.flagId,
+                          v,
+                          analyticsModal.rangeKey,
+                          analyticsModal.eventName
+                        )
+                      }
+                      disabled={analyticsModal.loading}
+                      className="flex-1 text-xs px-3 py-2 rounded-lg font-semibold transition-all disabled:opacity-50"
+                      style={{
+                        background: active
+                          ? "var(--bg-elevated)"
+                          : "transparent",
+                        color: active
+                          ? "#60a5fa"
+                          : "var(--text-muted)",
+                        boxShadow: active
+                          ? "0 1px 2px rgba(0,0,0,0.1)"
+                          : "none",
+                      }}
+                    >
+                      {v === "exposure" ? "Exposure" : "Conversion"}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Range selector + (conversion'da) event name input */}
+              <div className="flex flex-wrap items-center gap-2 px-6 pt-4">
+                {ranges.map((r) => {
+                  const active = analyticsModal.rangeKey === r;
+                  return (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() =>
+                        fetchAnalytics(
+                          analyticsModal.flagId,
+                          analyticsModal.view,
+                          r,
+                          analyticsModal.eventName
+                        )
+                      }
+                      disabled={analyticsModal.loading}
+                      className="text-xs px-3 py-1.5 rounded-lg font-semibold transition-all hover:opacity-80 disabled:opacity-50"
+                      style={{
+                        background: active
+                          ? "rgba(59,130,246,0.18)"
+                          : "var(--input-bg)",
+                        color: active ? "#60a5fa" : "var(--text-muted)",
+                        border: `1px solid ${
+                          active
+                            ? "rgba(59,130,246,0.3)"
+                            : "var(--input-border)"
+                        }`,
+                      }}
+                    >
+                      {rangeLabel(r)}
+                    </button>
+                  );
+                })}
+
+                {analyticsModal.view === "conversion" && (
+                  <div className="flex items-center gap-2 ml-auto">
+                    <label
+                      className="text-[11px] font-semibold uppercase tracking-widest"
+                      style={{ color: "var(--text-faint)" }}
+                    >
+                      Event
+                    </label>
+                    <input
+                      type="text"
+                      value={analyticsModal.eventName}
+                      onChange={(e) =>
+                        setAnalyticsModal((p) => ({
+                          ...p,
+                          eventName: e.target.value,
+                        }))
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          fetchAnalytics(
+                            analyticsModal.flagId,
+                            "conversion",
+                            analyticsModal.rangeKey,
+                            analyticsModal.eventName
+                          );
+                        }
+                      }}
+                      placeholder="checkout_completed"
+                      className="text-xs px-2.5 py-1.5 rounded-lg font-mono"
+                      style={{
+                        background: "var(--input-bg)",
+                        color: "var(--text-primary)",
+                        border: "1px solid var(--input-border)",
+                        width: 180,
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        fetchAnalytics(
+                          analyticsModal.flagId,
+                          "conversion",
+                          analyticsModal.rangeKey,
+                          analyticsModal.eventName
+                        )
+                      }
+                      disabled={
+                        analyticsModal.loading ||
+                        !analyticsModal.eventName.trim()
+                      }
+                      className="text-xs px-3 py-1.5 rounded-lg font-semibold transition-all disabled:opacity-50"
+                      style={{
+                        background: "rgba(59,130,246,0.18)",
+                        color: "#60a5fa",
+                        border: "1px solid rgba(59,130,246,0.3)",
+                      }}
+                    >
+                      Yükle
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Body */}
+              <div className="px-6 py-5 max-h-[60vh] overflow-y-auto">
+                {analyticsModal.loading ? (
+                  <p
+                    className="text-sm py-8 text-center"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    Yükleniyor…
+                  </p>
+                ) : analyticsModal.error ? (
+                  <p
+                    className="text-sm py-8 text-center"
+                    style={{ color: "#ef4444" }}
+                  >
+                    {analyticsModal.error}
+                  </p>
+                ) : analyticsModal.view === "exposure" ? (
+                  !exposureData || exposureVariants.length === 0 ? (
+                    <p
+                      className="text-sm py-8 text-center"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Bu aralıkta exposure event yok.
+                    </p>
+                  ) : (
+                    <>
+                      {/* Exposure Summary */}
+                      <div className="grid grid-cols-2 gap-3 mb-5">
+                        <div
+                          className="rounded-xl px-4 py-3"
+                          style={{
+                            background: "var(--input-bg)",
+                            border: "1px solid var(--input-border)",
+                          }}
+                        >
+                          <p
+                            className="text-[10px] font-semibold uppercase tracking-widest mb-1"
+                            style={{ color: "var(--text-faint)" }}
+                          >
+                            Toplam Exposure
+                          </p>
+                          <p
+                            className="text-xl font-bold font-mono"
+                            style={{ color: "var(--text-primary)" }}
+                          >
+                            {exposureData.totalExposures.toLocaleString("tr-TR")}
+                          </p>
+                        </div>
+                        <div
+                          className="rounded-xl px-4 py-3"
+                          style={{
+                            background: "var(--input-bg)",
+                            border: "1px solid var(--input-border)",
+                          }}
+                        >
+                          <p
+                            className="text-[10px] font-semibold uppercase tracking-widest mb-1"
+                            style={{ color: "var(--text-faint)" }}
+                          >
+                            Unique User
+                          </p>
+                          <p
+                            className="text-xl font-bold font-mono"
+                            style={{ color: "var(--text-primary)" }}
+                          >
+                            {exposureData.uniqueUsers.toLocaleString("tr-TR")}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Variant breakdown */}
+                      <p
+                        className="text-[11px] font-semibold uppercase tracking-widest mb-3"
+                        style={{ color: "var(--text-faint)" }}
+                      >
+                        Variant Dağılımı
+                      </p>
+                      <div className="space-y-2">
+                        {exposureVariants.map((v, vi) => {
+                          const label = outcomeLabel(v.variantKey, v.isOn);
+                          const pct =
+                            totalExposures > 0
+                              ? (v.totalExposures / totalExposures) * 100
+                              : 0;
+                          const hue =
+                            VARIANT_HUES[vi % VARIANT_HUES.length] ?? 200;
+                          const isOff = !v.variantKey && !v.isOn;
+                          return (
+                            <div
+                              key={`${v.variantId ?? "null"}-${v.isOn}`}
+                              className="rounded-xl px-3 py-2.5"
+                              style={{
+                                background: "var(--input-bg)",
+                                border: "1px solid var(--input-border)",
+                              }}
+                            >
+                              <div className="flex items-center justify-between mb-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className="w-2 h-2 rounded-full flex-shrink-0"
+                                    style={{
+                                      background: isOff
+                                        ? "#64748b"
+                                        : `hsl(${hue},65%,55%)`,
+                                    }}
+                                  />
+                                  <span
+                                    className="text-xs font-mono font-bold"
+                                    style={{ color: "var(--text-primary)" }}
+                                  >
+                                    {label}
+                                  </span>
+                                  {isOff && (
+                                    <span
+                                      className="text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase"
+                                      style={{
+                                        background: "rgba(100,116,139,0.15)",
+                                        color: "#94a3b8",
+                                      }}
+                                    >
+                                      off
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-3 text-xs font-mono">
+                                  <span style={{ color: "var(--text-muted)" }}>
+                                    {v.uniqueUsers.toLocaleString("tr-TR")} user
+                                  </span>
+                                  <span
+                                    className="font-bold"
+                                    style={{ color: "var(--text-primary)" }}
+                                  >
+                                    {pct.toFixed(1)}%
+                                  </span>
+                                </div>
+                              </div>
+                              <div
+                                className="h-1.5 rounded-full overflow-hidden"
+                                style={{ background: "var(--bg-page)" }}
+                              >
+                                <div
+                                  className="h-full transition-all"
+                                  style={{
+                                    width: `${pct}%`,
+                                    background: isOff
+                                      ? "#64748b"
+                                      : `hsl(${hue},65%,55%)`,
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )
+                ) : /* ─── CONVERSION VIEW ─── */
+                !conversionData || conversionVariants.length === 0 ? (
+                  <p
+                    className="text-sm py-8 text-center"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    Bu aralık + event için conversion bulunamadı.
+                  </p>
+                ) : (
+                  <>
+                    {/* Conversion Summary */}
+                    <div className="grid grid-cols-3 gap-3 mb-5">
+                      <div
+                        className="rounded-xl px-4 py-3"
+                        style={{
+                          background: "var(--input-bg)",
+                          border: "1px solid var(--input-border)",
+                        }}
+                      >
+                        <p
+                          className="text-[10px] font-semibold uppercase tracking-widest mb-1"
+                          style={{ color: "var(--text-faint)" }}
+                        >
+                          Toplam Exposed
+                        </p>
+                        <p
+                          className="text-lg font-bold font-mono"
+                          style={{ color: "var(--text-primary)" }}
+                        >
+                          {conversionData.totalExposedUsers.toLocaleString(
+                            "tr-TR"
+                          )}
+                        </p>
+                      </div>
+                      <div
+                        className="rounded-xl px-4 py-3"
+                        style={{
+                          background: "var(--input-bg)",
+                          border: "1px solid var(--input-border)",
+                        }}
+                      >
+                        <p
+                          className="text-[10px] font-semibold uppercase tracking-widest mb-1"
+                          style={{ color: "var(--text-faint)" }}
+                        >
+                          Converted
+                        </p>
+                        <p
+                          className="text-lg font-bold font-mono"
+                          style={{ color: "var(--text-primary)" }}
+                        >
+                          {conversionData.totalConvertedUsers.toLocaleString(
+                            "tr-TR"
+                          )}
+                        </p>
+                      </div>
+                      <div
+                        className="rounded-xl px-4 py-3"
+                        style={{
+                          background: "var(--input-bg)",
+                          border: "1px solid var(--input-border)",
+                        }}
+                      >
+                        <p
+                          className="text-[10px] font-semibold uppercase tracking-widest mb-1"
+                          style={{ color: "var(--text-faint)" }}
+                        >
+                          Toplam Gelir
+                        </p>
+                        <p
+                          className="text-lg font-bold font-mono"
+                          style={{ color: "var(--text-primary)" }}
+                        >
+                          {Number(conversionData.totalValue).toLocaleString(
+                            "tr-TR",
+                            { maximumFractionDigits: 0 }
+                          )}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Variant performance */}
+                    <p
+                      className="text-[11px] font-semibold uppercase tracking-widest mb-3"
+                      style={{ color: "var(--text-faint)" }}
+                    >
+                      Variant Performansı
+                    </p>
+                    <div className="space-y-2">
+                      {[...conversionVariants]
+                        .sort(
+                          (a, b) =>
+                            conversionRate(b) - conversionRate(a)
+                        )
+                        .map((v, vi) => {
+                          const label = outcomeLabel(v.variantKey, v.isOn);
+                          const rate = conversionRate(v);
+                          const avg = avgValuePerConverter(v);
+                          // Backend stats verilerini öncele; eski client-side fallback hâlâ duruyor.
+                          const lift = v.liftPercent ?? null;
+                          const isBaseline = v.isBaseline;
+                          const isWinner =
+                            winner &&
+                            v.variantId === winner.variantId &&
+                            v.isOn === winner.isOn &&
+                            conversionVariants.length > 1 &&
+                            !isBaseline;
+                          const hue =
+                            VARIANT_HUES[vi % VARIANT_HUES.length] ?? 200;
+
+                          // Significance gösterimi: hesaplanmış (non-baseline) variant'larda.
+                          const hasStats =
+                            !isBaseline && v.pValue !== null && v.pValue !== undefined;
+
+                          return (
+                            <div
+                              key={`${v.variantId ?? "null"}-${v.isOn}`}
+                              className="rounded-xl px-4 py-3"
+                              style={{
+                                background: "var(--input-bg)",
+                                border: isWinner
+                                  ? "1px solid rgba(16,185,129,0.4)"
+                                  : "1px solid var(--input-border)",
+                                boxShadow: isWinner
+                                  ? "0 0 0 1px rgba(16,185,129,0.2)"
+                                  : "none",
+                              }}
+                            >
+                              {/* Row 1: label + lift badge */}
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                                    style={{
+                                      background: `hsl(${hue},65%,55%)`,
+                                    }}
+                                  />
+                                  <span
+                                    className="text-sm font-mono font-bold"
+                                    style={{ color: "var(--text-primary)" }}
+                                  >
+                                    {label}
+                                  </span>
+                                  {isWinner && (
+                                    <span
+                                      className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase"
+                                      style={{
+                                        background: "rgba(16,185,129,0.15)",
+                                        color: "#10b981",
+                                      }}
+                                    >
+                                      🏆 Kazanan
+                                    </span>
+                                  )}
+                                  {isBaseline && (
+                                    <span
+                                      className="text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase"
+                                      style={{
+                                        background: "rgba(100,116,139,0.15)",
+                                        color: "#94a3b8",
+                                      }}
+                                    >
+                                      baseline
+                                    </span>
+                                  )}
+                                </div>
+                                {lift !== null && !isBaseline && (
+                                  <span
+                                    className="text-sm font-mono font-bold"
+                                    style={{
+                                      color:
+                                        lift > 0
+                                          ? "#10b981"
+                                          : lift < 0
+                                          ? "#ef4444"
+                                          : "var(--text-muted)",
+                                    }}
+                                  >
+                                    {lift > 0 ? "+" : ""}
+                                    {lift.toFixed(1)}%
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Row 2: numbers */}
+                              <div className="grid grid-cols-3 gap-3 text-xs font-mono">
+                                <div>
+                                  <p
+                                    className="text-[10px] uppercase tracking-wider mb-0.5"
+                                    style={{ color: "var(--text-faint)" }}
+                                  >
+                                    Conv. Rate
+                                  </p>
+                                  <p
+                                    className="font-bold"
+                                    style={{ color: "var(--text-primary)" }}
+                                  >
+                                    {(rate * 100).toFixed(2)}%
+                                  </p>
+                                </div>
+                                <div>
+                                  <p
+                                    className="text-[10px] uppercase tracking-wider mb-0.5"
+                                    style={{ color: "var(--text-faint)" }}
+                                  >
+                                    Exposed / Conv.
+                                  </p>
+                                  <p
+                                    className="font-bold"
+                                    style={{ color: "var(--text-primary)" }}
+                                  >
+                                    {v.exposedUsers.toLocaleString("tr-TR")} →{" "}
+                                    {v.convertedUsers.toLocaleString("tr-TR")}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p
+                                    className="text-[10px] uppercase tracking-wider mb-0.5"
+                                    style={{ color: "var(--text-faint)" }}
+                                  >
+                                    Avg Value
+                                  </p>
+                                  <p
+                                    className="font-bold"
+                                    style={{ color: "var(--text-primary)" }}
+                                  >
+                                    {avg.toFixed(2)}
+                                  </p>
+                                </div>
+                              </div>
+
+                              {/* Row 3: rate bar */}
+                              <div
+                                className="h-1.5 rounded-full overflow-hidden mt-2.5"
+                                style={{ background: "var(--bg-page)" }}
+                              >
+                                <div
+                                  className="h-full transition-all"
+                                  style={{
+                                    width: `${Math.min(100, rate * 100 * 3)}%`,
+                                    background: `hsl(${hue},65%,55%)`,
+                                  }}
+                                />
+                              </div>
+
+                              {/* Row 4: significance + confidence interval */}
+                              {hasStats && (
+                                <div
+                                  className="mt-2.5 rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2 text-[11px]"
+                                  style={{
+                                    background: v.isSignificant
+                                      ? "rgba(16,185,129,0.08)"
+                                      : "rgba(245,158,11,0.08)",
+                                    border: v.isSignificant
+                                      ? "1px solid rgba(16,185,129,0.2)"
+                                      : "1px solid rgba(245,158,11,0.2)",
+                                  }}
+                                >
+                                  <span
+                                    className="font-semibold"
+                                    style={{
+                                      color: v.isSignificant
+                                        ? "#10b981"
+                                        : "#f59e0b",
+                                    }}
+                                  >
+                                    {v.isSignificant
+                                      ? "✓ %95 güvenle anlamlı"
+                                      : "⚠ Yetersiz veri"}
+                                  </span>
+                                  {v.liftCiLowPercent !== null &&
+                                    v.liftCiLowPercent !== undefined &&
+                                    v.liftCiHighPercent !== null &&
+                                    v.liftCiHighPercent !== undefined && (
+                                      <span
+                                        className="font-mono"
+                                        style={{ color: "var(--text-muted)" }}
+                                      >
+                                        gerçek lift:{" "}
+                                        {v.liftCiLowPercent > 0 ? "+" : ""}
+                                        {v.liftCiLowPercent.toFixed(1)}% ~{" "}
+                                        {v.liftCiHighPercent > 0 ? "+" : ""}
+                                        {v.liftCiHighPercent.toFixed(1)}%
+                                      </span>
+                                    )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div
+                className="px-6 py-4 flex justify-end"
+                style={{ borderTop: "1px solid var(--divider)" }}
+              >
+                <button
+                  type="button"
+                  onClick={() =>
+                    fetchAnalytics(
+                      analyticsModal.flagId,
+                      analyticsModal.view,
+                      analyticsModal.rangeKey,
+                      analyticsModal.eventName
+                    )
+                  }
+                  disabled={analyticsModal.loading}
+                  className="text-xs px-3 py-1.5 rounded-lg font-semibold"
+                  style={{
+                    background: "var(--input-bg)",
+                    color: "var(--text-muted)",
+                    border: "1px solid var(--input-border)",
+                  }}
+                >
+                  {analyticsModal.loading ? "Yenileniyor…" : "Yenile"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

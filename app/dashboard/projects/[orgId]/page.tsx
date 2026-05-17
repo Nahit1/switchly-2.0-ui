@@ -240,7 +240,7 @@ export default function ProjectsPage() {
 
                 {/* Project Key */}
                 <div className="mb-4">
-                  <p className="text-[10px] font-semibold uppercase tracking-widest mb-1.5" style={{ color: "var(--text-faint)" }}>
+                  <p className="text-[11px] font-semibold uppercase tracking-widest mb-1.5" style={{ color: "var(--text-faint)" }}>
                     Project Key
                   </p>
                   <div

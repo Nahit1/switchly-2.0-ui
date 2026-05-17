@@ -1,5 +1,13 @@
 import { api } from "@/lib/utils/api";
-import type { FlagListResponse, FeatureFlagType, RolloutKind } from "@/lib/types/feature-flag";
+import type {
+  FlagListResponse,
+  FeatureFlagType,
+  RolloutKind,
+  VariantInput,
+  VariantWeightInput,
+  FlagExposureStatsResponse,
+  FlagConversionStatsResponse,
+} from "@/lib/types/feature-flag";
 
 export interface FlagServiceResponse {
   success: boolean;
@@ -23,7 +31,8 @@ export const featureFlagService = {
     key: string,
     name: string,
     description: string,
-    type: FeatureFlagType
+    type: FeatureFlagType,
+    variants?: VariantInput[]
   ): Promise<FlagServiceResponse> {
     return api.post<FlagServiceResponse>("/api/flag/create", {
       organizationId,
@@ -32,6 +41,7 @@ export const featureFlagService = {
       name,
       description,
       type,
+      variants: variants && variants.length > 0 ? variants : undefined,
     });
   },
 
@@ -63,11 +73,118 @@ export const featureFlagService = {
 
   assignSegment(
     featureFlagEnvironmentId: string,
-    segmentGroupId: string
+    segmentGroupId: string,
+    rolloutKind: RolloutKind,
+    rolloutPercentage: number,
+    priority: number = 0
   ): Promise<FlagServiceResponse> {
     return api.post<FlagServiceResponse>("/api/flag-environments/segments", {
       featureFlagEnvironmentId,
       segmentGroupId,
+      rolloutKind,
+      rolloutPercentage,
+      priority,
     });
+  },
+
+  updateTargeting(
+    targetingId: string,
+    rolloutKind: RolloutKind,
+    rolloutPercentage: number,
+    priority: number,
+    isEnabled: boolean
+  ): Promise<FlagServiceResponse> {
+    return api.put<FlagServiceResponse>(
+      `/api/flag-environments/segments/${targetingId}`,
+      { rolloutKind, rolloutPercentage, priority, isEnabled }
+    );
+  },
+
+  removeTargeting(targetingId: string): Promise<FlagServiceResponse> {
+    return api.delete<FlagServiceResponse>(
+      `/api/flag-environments/segments/${targetingId}`
+    );
+  },
+
+  /* ── Variant CRUD ────────────────────────────────────────────── */
+
+  addVariant(
+    flagId: string,
+    key: string,
+    name?: string,
+    payloadJson?: string
+  ): Promise<FlagServiceResponse> {
+    return api.post<FlagServiceResponse>(`/api/flag/${flagId}/variants`, {
+      key,
+      name,
+      payloadJson,
+    });
+  },
+
+  updateVariant(
+    variantId: string,
+    name?: string,
+    payloadJson?: string
+  ): Promise<FlagServiceResponse> {
+    return api.patch<FlagServiceResponse>(`/api/variant/${variantId}`, {
+      name,
+      payloadJson,
+    });
+  },
+
+  deleteVariant(variantId: string): Promise<FlagServiceResponse> {
+    return api.delete<FlagServiceResponse>(`/api/variant/${variantId}`);
+  },
+
+  /* ── Variant weights ─────────────────────────────────────────── */
+
+  setEnvVariantWeights(
+    flagEnvironmentId: string,
+    weights: VariantWeightInput[]
+  ): Promise<FlagServiceResponse> {
+    return api.put<FlagServiceResponse>(
+      `/api/flag/environment/${flagEnvironmentId}/variant-weights`,
+      { weights }
+    );
+  },
+
+  setTargetingVariantWeights(
+    targetingId: string,
+    weights: VariantWeightInput[]
+  ): Promise<FlagServiceResponse> {
+    return api.put<FlagServiceResponse>(
+      `/api/flag/targeting/${targetingId}/variant-weights`,
+      { weights }
+    );
+  },
+
+  /* ── Exposure analytics ──────────────────────────────────────── */
+
+  getExposureStats(
+    flagId: string,
+    sinceIsoUtc: string,
+    environmentId?: string
+  ): Promise<FlagExposureStatsResponse> {
+    const params = new URLSearchParams({ since: sinceIsoUtc });
+    if (environmentId) params.set("environmentId", environmentId);
+    return api.get<FlagExposureStatsResponse>(
+      `/api/flag/${flagId}/exposure-stats?${params.toString()}`
+    );
+  },
+
+  getConversionStats(
+    flagId: string,
+    eventName: string,
+    sinceIsoUtc: string,
+    environmentId?: string
+  ): Promise<FlagConversionStatsResponse> {
+    const params = new URLSearchParams({
+      eventName,
+      since: sinceIsoUtc,
+    });
+    if (environmentId) params.set("environmentId", environmentId);
+    return api.get<FlagConversionStatsResponse>(
+      `/api/flag/${flagId}/conversion-stats?${params.toString()}`
+    );
   },
 };

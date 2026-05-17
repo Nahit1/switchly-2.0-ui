@@ -1,6 +1,8 @@
 /* ── Enums ─────────────────────────────────────────────────────── */
 // C# enum: String = 0, Boolean = 1, Integer = 2, Double = 3
 export type SegmentValueType = 0 | 1 | 2 | 3 | "String" | "Boolean" | "Integer" | "Double" | string;
+// C# enum: And = 1, Or = 2, Not = 3
+export type LogicalOperator = 1 | 2 | 3 | "And" | "Or" | "Not";
 
 /* ── Segment Rule ───────────────────────────────────────────────── */
 export interface SegmentRuleDto {
@@ -20,6 +22,7 @@ export interface SegmentGroupDto {
   key?: string;
   description?: string;
   organizationId?: string;
+  logicalOperator?: LogicalOperator;
   segmentRules?: SegmentRuleDto[];
   [key: string]: unknown;
 }

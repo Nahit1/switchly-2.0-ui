@@ -1,4 +1,7 @@
-export type ProjectSettingDataType = string | number;
+// C# enum: String=1, Number=2, Boolean=3, Json=4
+export type ProjectSettingDataType =
+  | 1 | 2 | 3 | 4
+  | "String" | "Number" | "Boolean" | "Json";
 
 /* ── Legacy types (kept for reference) ────────────────────────── */
 export interface ProjectSettingValueDto {
@@ -46,4 +49,11 @@ export interface ProjectSettingsByEnvironmentResponse {
   success: boolean;
   data?: ProjectSettingByEnvironmentDto[];
   message?: string;
+}
+
+/* ── Mutations ────────────────────────────────────────────────── */
+export interface SettingMutationResponse {
+  success: boolean;
+  message?: string;
+  data?: unknown;
 }
