@@ -30,6 +30,30 @@ export interface SegmentGroupsDto {
 }
 
 /* ── Environment ───────────────────────────────────────────────── */
+export interface EnvRolloutScheduleStepDto {
+  stepIndex: number;
+  percentage: number;
+  durationMinutes: number;
+  promotedAt?: string | null;
+}
+
+export interface EnvRolloutScheduleDto {
+  id: string;
+  targetVariantId?: string | null;
+  targetVariantKey?: string | null;
+  status: string;
+  currentStepIndex: number;
+  startedAt?: string | null;
+  lastTransitionAt?: string | null;
+  pausedAt?: string | null;
+  steps: EnvRolloutScheduleStepDto[];
+  // Seviye 2 guardrail alanları
+  errorThreshold?: number | null;
+  errorWindowMinutes?: number;
+  minSeverity?: string | null;
+  rolledBackReason?: string | null;
+}
+
 export interface GetFlagEnvironmentDto {
   projectEnvironmentId?: string;
   featureFlagEnvironmentId?: string;
@@ -40,6 +64,7 @@ export interface GetFlagEnvironmentDto {
   defaultRolloutPercentage?: number;
   segmentGroups?: SegmentGroupsDto[];
   variantWeights?: VariantWeightDto[];
+  rolloutSchedule?: EnvRolloutScheduleDto | null;
   [key: string]: unknown;
 }
 
@@ -130,6 +155,7 @@ export interface VariantConversionStatsDto {
   liftCiLowPercent?: number | null;   // %95 güven aralığı alt sınır
   liftCiHighPercent?: number | null;  // üst sınır
   isBaseline: boolean;                // bu satır baseline mı (UI badge için)
+  requiredAdditionalUsers?: number | null;  // significance'a ulaşmak için kaç user daha gerek
   [key: string]: unknown;
 }
 
@@ -148,5 +174,52 @@ export interface FlagConversionStatsDto {
 export interface FlagConversionStatsResponse {
   success: boolean;
   data?: FlagConversionStatsDto;
+  message?: string;
+}
+
+/* ── Conversion event names (auto-discovery) ───────────────────── */
+export interface ConversionEventNameDto {
+  eventName: string;
+  count: number;
+}
+
+export interface ConversionEventNamesResponse {
+  success: boolean;
+  data?: ConversionEventNameDto[];
+  message?: string;
+}
+
+/* ── Exposure timeline (time-series) ───────────────────────────── */
+export interface TimelineBucketVariantDto {
+  variantId?: string | null;
+  isOn: boolean;
+  exposures: number;
+}
+
+export interface TimelineBucketDto {
+  bucket: string; // ISO timestamp (start of bucket)
+  variants: TimelineBucketVariantDto[];
+}
+
+export interface TimelineVariantDto {
+  variantId?: string | null;
+  variantKey?: string | null;
+  isOn: boolean;
+  sortOrder: number;
+}
+
+export interface FlagExposureTimelineDto {
+  flagId: string;
+  flagKey: string;
+  bucketSize: "hour" | "day" | string;
+  since: string;
+  buckets: TimelineBucketDto[];
+  variants: TimelineVariantDto[];
+  [key: string]: unknown;
+}
+
+export interface FlagExposureTimelineResponse {
+  success: boolean;
+  data?: FlagExposureTimelineDto;
   message?: string;
 }

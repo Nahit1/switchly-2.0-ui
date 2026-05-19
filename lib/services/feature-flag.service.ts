@@ -7,6 +7,8 @@ import type {
   VariantWeightInput,
   FlagExposureStatsResponse,
   FlagConversionStatsResponse,
+  ConversionEventNamesResponse,
+  FlagExposureTimelineResponse,
 } from "@/lib/types/feature-flag";
 
 export interface FlagServiceResponse {
@@ -185,6 +187,34 @@ export const featureFlagService = {
     if (environmentId) params.set("environmentId", environmentId);
     return api.get<FlagConversionStatsResponse>(
       `/api/flag/${flagId}/conversion-stats?${params.toString()}`
+    );
+  },
+
+  getConversionEventNames(
+    projectId: string,
+    sinceIsoUtc?: string
+  ): Promise<ConversionEventNamesResponse> {
+    const params = new URLSearchParams();
+    if (sinceIsoUtc) params.set("since", sinceIsoUtc);
+    const qs = params.toString();
+    return api.get<ConversionEventNamesResponse>(
+      `/api/project/${projectId}/conversion-event-names${qs ? `?${qs}` : ""}`
+    );
+  },
+
+  getExposureTimeline(
+    flagId: string,
+    bucketSize: "hour" | "day",
+    sinceIsoUtc: string,
+    environmentId?: string
+  ): Promise<FlagExposureTimelineResponse> {
+    const params = new URLSearchParams({
+      bucketSize,
+      since: sinceIsoUtc,
+    });
+    if (environmentId) params.set("environmentId", environmentId);
+    return api.get<FlagExposureTimelineResponse>(
+      `/api/flag/${flagId}/exposure-timeline?${params.toString()}`
     );
   },
 };

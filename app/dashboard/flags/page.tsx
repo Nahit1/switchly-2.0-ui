@@ -4,6 +4,7 @@ import { Fragment, useEffect, useState } from "react";
 import { organizationService } from "@/lib/services/organization.service";
 import { projectService } from "@/lib/services/project.service";
 import { featureFlagService } from "@/lib/services/feature-flag.service";
+import { rolloutService } from "@/lib/services/rollout.service";
 import { segmentService } from "@/lib/services/segment.service";
 import type { Organization } from "@/lib/types/organization";
 import type { Project } from "@/lib/types/project";
@@ -19,8 +20,16 @@ import type {
   FlagExposureStatsDto,
   FlagConversionStatsDto,
   VariantConversionStatsDto,
+  ConversionEventNameDto,
+  FlagExposureTimelineDto,
+  TimelineVariantDto,
+  EnvRolloutScheduleDto,
 } from "@/lib/types/feature-flag";
 import type { SegmentGroupDto } from "@/lib/types/segment";
+import type {
+  RolloutScheduleDto,
+  RolloutStepInput,
+} from "@/lib/types/rollout";
 
 /* ── Flag type helpers (C# enum: Boolean=1, Multivariant=2, Config=3) ── */
 function flagTypeLabel(type?: FeatureFlagType): string {
@@ -284,9 +293,9 @@ const CLOSED_EDIT_TARGETING_MODAL: EditTargetingModal = {
   error: "",
 };
 
-/* ── Analytics Modal state (exposure + conversion stats per flag) ─ */
+/* ── Analytics Modal state (exposure + conversion + timeline) ─ */
 type AnalyticsRange = "1h" | "24h" | "7d" | "30d";
-type AnalyticsView = "exposure" | "conversion";
+type AnalyticsView = "exposure" | "conversion" | "timeline";
 
 interface AnalyticsModal {
   open: boolean;
@@ -299,6 +308,9 @@ interface AnalyticsModal {
   error: string;
   exposureData: FlagExposureStatsDto | null;
   conversionData: FlagConversionStatsDto | null;
+  timelineData: FlagExposureTimelineDto | null;
+  availableEvents: ConversionEventNameDto[];  // auto-discovery için (son 30 günde tracking edilmiş)
+  eventsLoaded: boolean;                       // fetch denendi mi (boş liste fail değil)
 }
 
 const CLOSED_ANALYTICS_MODAL: AnalyticsModal = {
@@ -312,7 +324,112 @@ const CLOSED_ANALYTICS_MODAL: AnalyticsModal = {
   error: "",
   exposureData: null,
   conversionData: null,
+  timelineData: null,
+  availableEvents: [],
+  eventsLoaded: false,
 };
+
+// Range'e göre uygun bucket büyüklüğü: kısa aralık → saatlik, uzun → günlük.
+function pickBucketSize(range: AnalyticsRange): "hour" | "day" {
+  return range === "7d" || range === "30d" ? "day" : "hour";
+}
+
+/* ── Rollout Schedule create modal state ───────────────────────── */
+interface ScheduleModal {
+  open: boolean;
+  flagEnvironmentId: string;
+  flagId: string;
+  flagKey: string;
+  flagType: FeatureFlagType;
+  variants: GetFlagVariantDto[];   // multivariant ise variant seçimi için
+  targetVariantId: string;          // boş = boolean'da kullanılmıyor
+  steps: { percentage: number; durationMinutes: number }[];
+  // Seviye 2 guardrail
+  errorThreshold: number;            // 0 = guardrail kapalı
+  errorWindowMinutes: number;
+  minSeverity: "Info" | "Warning" | "Error" | "Critical";
+  saving: boolean;
+  error: string;
+}
+
+const CLOSED_SCHEDULE_MODAL: ScheduleModal = {
+  open: false,
+  flagEnvironmentId: "",
+  flagId: "",
+  flagKey: "",
+  flagType: 1,
+  variants: [],
+  targetVariantId: "",
+  steps: [
+    { percentage: 10, durationMinutes: 60 },
+    { percentage: 25, durationMinutes: 240 },
+    { percentage: 50, durationMinutes: 1440 },
+    { percentage: 100, durationMinutes: 0 },
+  ],
+  errorThreshold: 0,             // 0 = guardrail kapalı (default)
+  errorWindowMinutes: 10,
+  minSeverity: "Error",
+  saving: false,
+  error: "",
+};
+
+function formatDurationMinutes(mins: number): string {
+  if (mins <= 0) return "—";
+  if (mins < 60) return `${mins} dk`;
+  if (mins < 1440) {
+    const hours = Math.floor(mins / 60);
+    const remain = mins % 60;
+    return remain === 0 ? `${hours} sa` : `${hours} sa ${remain} dk`;
+  }
+  const days = Math.floor(mins / 1440);
+  const remainH = Math.floor((mins % 1440) / 60);
+  return remainH === 0 ? `${days} gün` : `${days} gün ${remainH} sa`;
+}
+
+function formatRelativeFromNow(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const target = new Date(iso).getTime();
+  const now = Date.now();
+  const diff = target - now;
+  if (Math.abs(diff) < 60_000) return "şimdi";
+  const abs = Math.abs(diff);
+  const mins = Math.floor(abs / 60_000);
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+  let txt: string;
+  if (days >= 1) txt = `${days} gün`;
+  else if (hours >= 1) txt = `${hours} sa`;
+  else txt = `${mins} dk`;
+  return diff < 0 ? `${txt} önce` : `${txt} sonra`;
+}
+
+function scheduleStatusStyle(status: string): { bg: string; color: string; label: string } {
+  switch (status) {
+    case "Active":
+      return { bg: "rgba(16,185,129,0.15)", color: "#10b981", label: "Aktif" };
+    case "Paused":
+      return { bg: "rgba(245,158,11,0.15)", color: "#f59e0b", label: "Duraklatıldı" };
+    case "Completed":
+      return { bg: "rgba(59,130,246,0.15)", color: "#60a5fa", label: "Tamamlandı" };
+    case "RolledBack":
+      return { bg: "rgba(239,68,68,0.15)", color: "#ef4444", label: "Geri Alındı" };
+    default:
+      return { bg: "rgba(100,116,139,0.15)", color: "#94a3b8", label: status };
+  }
+}
+
+// Timeline'da outcome key (variant key ya da on/off) için stable color hue üretimi.
+function outcomeHue(
+  variants: TimelineVariantDto[],
+  variantId: string | null | undefined,
+  isOn: boolean
+): number {
+  const idx = variants.findIndex(
+    (v) => (v.variantId ?? null) === (variantId ?? null) && v.isOn === isOn
+  );
+  if (idx < 0) return 200;
+  return VARIANT_HUES[idx % VARIANT_HUES.length] ?? 200;
+}
 
 function rangeToSinceIso(range: AnalyticsRange): string {
   const now = Date.now();
@@ -413,6 +530,13 @@ export default function FlagsPage() {
   /* ── Analytics modal (exposure stats) ───────────────────── */
   const [analyticsModal, setAnalyticsModal] =
     useState<AnalyticsModal>(CLOSED_ANALYTICS_MODAL);
+
+  /* ── Rollout schedule cache (per flagEnvId) ─────────────── */
+  const [schedulesByEnv, setSchedulesByEnv] = useState<
+    Record<string, RolloutScheduleDto | null>
+  >({});
+  const [scheduleModal, setScheduleModal] =
+    useState<ScheduleModal>(CLOSED_SCHEDULE_MODAL);
 
   /* ── Create modal ──────────────────────────────────────── */
   const [modalOpen, setModalOpen] = useState(false);
@@ -938,7 +1062,31 @@ export default function FlagsPage() {
       rangeKey: "24h",
       loading: true,
     });
-    await fetchAnalytics(flagId, "exposure", "24h", "checkout_completed");
+    // Exposure data ile event isimleri paralel çek; event listesi conversion sekmesinde lazım olacak.
+    await Promise.all([
+      fetchAnalytics(flagId, "exposure", "24h", "checkout_completed"),
+      fetchAvailableEvents(),
+    ]);
+  }
+
+  async function fetchAvailableEvents() {
+    if (!selectedProjectId) return;
+    try {
+      const res = await featureFlagService.getConversionEventNames(selectedProjectId);
+      const list = res.data ?? [];
+      setAnalyticsModal((p) => ({
+        ...p,
+        availableEvents: list,
+        eventsLoaded: true,
+        // Henüz event ismi girilmemişse en sık görülen event'i default seç.
+        eventName:
+          p.eventName && p.eventName.length > 0
+            ? p.eventName
+            : list[0]?.eventName ?? "checkout_completed",
+      }));
+    } catch {
+      setAnalyticsModal((p) => ({ ...p, eventsLoaded: true }));
+    }
   }
 
   async function fetchAnalytics(
@@ -967,7 +1115,7 @@ export default function FlagsPage() {
           exposureData: res.data ?? null,
           error: res.success ? "" : res.message ?? "Bir hata oluştu.",
         }));
-      } else {
+      } else if (view === "conversion") {
         const res = await featureFlagService.getConversionStats(
           flagId,
           eventName,
@@ -979,6 +1127,19 @@ export default function FlagsPage() {
           conversionData: res.data ?? null,
           error: res.success ? "" : res.message ?? "Bir hata oluştu.",
         }));
+      } else {
+        // timeline
+        const res = await featureFlagService.getExposureTimeline(
+          flagId,
+          pickBucketSize(range),
+          rangeToSinceIso(range)
+        );
+        setAnalyticsModal((p) => ({
+          ...p,
+          loading: false,
+          timelineData: res.data ?? null,
+          error: res.success ? "" : res.message ?? "Bir hata oluştu.",
+        }));
       }
     } catch (err: unknown) {
       setAnalyticsModal((p) => ({
@@ -987,6 +1148,121 @@ export default function FlagsPage() {
         error:
           err instanceof Error ? err.message : "Analytics çekilemedi.",
       }));
+    }
+  }
+
+  /* ═══ rollout schedule ════════════════════════════════════ */
+  async function fetchSchedule(flagEnvironmentId: string) {
+    try {
+      const res = await rolloutService.getByEnvironment(flagEnvironmentId);
+      setSchedulesByEnv((p) => ({
+        ...p,
+        [flagEnvironmentId]: res.data ?? null,
+      }));
+    } catch {
+      // Sessizce yut — schedule yoksa veya hata olursa kart gizli kalır.
+    }
+  }
+
+  // Schedule kartı varsayılan olarak `env.rolloutSchedule` (GetByProject response'unda gömülü)
+  // okur. Mutation sonrası tek env için fetchSchedule(envId) ile cache'i (schedulesByEnv)
+  // güncelliyoruz — `schedulesByEnv[envId]` varsa onu tercih ediyoruz, yoksa env'inkini.
+
+  function openCreateScheduleModal(
+    flagId: string,
+    flagKey: string,
+    flagEnvironmentId: string,
+    flagType: FeatureFlagType,
+    variants: GetFlagVariantDto[]
+  ) {
+    setScheduleModal({
+      ...CLOSED_SCHEDULE_MODAL,
+      open: true,
+      flagId,
+      flagKey,
+      flagEnvironmentId,
+      flagType,
+      variants,
+      targetVariantId:
+        flagType === 2 || flagType === "Multivariant"
+          ? (variants[0]?.id ?? (variants[0] as { Id?: string })?.["Id"] ?? "")
+          : "",
+    });
+  }
+
+  async function handleCreateSchedule() {
+    const m = scheduleModal;
+    if (m.steps.length === 0) {
+      setScheduleModal((p) => ({ ...p, error: "En az 1 step gerekli." }));
+      return;
+    }
+    const isMulti = m.flagType === 2 || m.flagType === "Multivariant";
+    if (isMulti && !m.targetVariantId) {
+      setScheduleModal((p) => ({ ...p, error: "Target variant seç." }));
+      return;
+    }
+    setScheduleModal((p) => ({ ...p, saving: true, error: "" }));
+    try {
+      const steps: RolloutStepInput[] = m.steps.map((s) => ({
+        percentage: s.percentage,
+        durationMinutes: s.durationMinutes,
+      }));
+      await rolloutService.create(
+        m.flagEnvironmentId,
+        isMulti ? m.targetVariantId : null,
+        steps,
+        m.errorThreshold > 0
+          ? {
+              errorThreshold: m.errorThreshold,
+              errorWindowMinutes: m.errorWindowMinutes,
+              minSeverity: m.minSeverity,
+            }
+          : undefined
+      );
+      setScheduleModal(CLOSED_SCHEDULE_MODAL);
+      // refreshFlags GetByProject'i yeniden çağırır; o response'ta rolloutSchedule
+      // alanı güncel geliyor — ekstra ayrı fetch gerekmiyor.
+      // Override cache'i temizle ki refresh'in getirdiği embedded data kullanılsın.
+      setSchedulesByEnv((p) => {
+        const { [m.flagEnvironmentId]: _omit, ...rest } = p;
+        return rest;
+      });
+      await refreshFlags();
+    } catch (err: unknown) {
+      setScheduleModal((p) => ({
+        ...p,
+        saving: false,
+        error:
+          err instanceof Error ? err.message : "Schedule kaydedilemedi.",
+      }));
+    }
+  }
+
+  async function handleScheduleAction(
+    scheduleId: string,
+    flagEnvironmentId: string,
+    action: "pause" | "resume" | "rollback"
+  ) {
+    if (action === "rollback") {
+      if (
+        !window.confirm(
+          "Schedule geri alınsın mı? Variant/flag durumu rollout öncesi haline döner."
+        )
+      )
+        return;
+    }
+    try {
+      if (action === "pause") await rolloutService.pause(scheduleId);
+      else if (action === "resume") await rolloutService.resume(scheduleId);
+      else await rolloutService.rollback(scheduleId);
+      // refreshFlags zaten güncel schedule'ı getirir; override cache'i temizle.
+      setSchedulesByEnv((p) => {
+        const { [flagEnvironmentId]: _omit, ...rest } = p;
+        return rest;
+      });
+      await refreshFlags();
+    } catch (err: unknown) {
+      window.alert(err instanceof Error ? err.message : "İşlem başarısız.");
     }
   }
 
@@ -2250,6 +2526,395 @@ export default function FlagsPage() {
                                         })}
                                       </div>
                                     )}
+
+                                    {/* ── Rollout Schedule card (Seviye 1) ── */}
+                                    {(() => {
+                                      // env.rolloutSchedule = GetByProject'in gömdüğü güncel veri.
+                                      // schedulesByEnv override = mutation sonrası fresh fetch.
+                                      const embedded = (env.rolloutSchedule ??
+                                        (env as { RolloutSchedule?: unknown })[
+                                          "RolloutSchedule"
+                                        ]) as
+                                        | EnvRolloutScheduleDto
+                                        | null
+                                        | undefined;
+                                      const overrideSched =
+                                        schedulesByEnv[featureFlagEnvId];
+                                      // Override null ise (mutation sonrası "schedule yok" demek): null göster.
+                                      // Override undefined ise (hiç fetch yapılmadı): embedded'a düş.
+                                      const sched =
+                                        overrideSched === undefined
+                                          ? embedded
+                                            ? (embedded as unknown as RolloutScheduleDto)
+                                            : null
+                                          : overrideSched;
+                                      const isActiveOrPaused =
+                                        sched &&
+                                        (sched.status === "Active" ||
+                                          sched.status === "Paused");
+                                      if (!sched || !isActiveOrPaused) {
+                                        const autoRolledBack =
+                                          sched &&
+                                          sched.status === "RolledBack" &&
+                                          sched.rolledBackReason ===
+                                            "errors-exceeded";
+                                        return (
+                                          <div className="px-4 pb-4">
+                                            <div className="flex items-center flex-wrap gap-2">
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  openCreateScheduleModal(
+                                                    flagId,
+                                                    flagKey ?? "",
+                                                    featureFlagEnvId,
+                                                    flagType ?? 1,
+                                                    varList
+                                                  )
+                                                }
+                                                className="text-[11px] px-2.5 py-1 rounded-md font-semibold"
+                                                style={{
+                                                  background:
+                                                    "rgba(59,130,246,0.10)",
+                                                  color: "#60a5fa",
+                                                  border:
+                                                    "1px solid rgba(59,130,246,0.20)",
+                                                }}
+                                              >
+                                                + Rollout Schedule
+                                              </button>
+                                              {sched && (
+                                                <span
+                                                  className="text-[10px] px-1.5 py-0.5 rounded font-semibold"
+                                                  style={{
+                                                    background:
+                                                      scheduleStatusStyle(
+                                                        sched.status
+                                                      ).bg,
+                                                    color:
+                                                      scheduleStatusStyle(
+                                                        sched.status
+                                                      ).color,
+                                                  }}
+                                                >
+                                                  Son:{" "}
+                                                  {
+                                                    scheduleStatusStyle(
+                                                      sched.status
+                                                    ).label
+                                                  }
+                                                </span>
+                                              )}
+                                            </div>
+                                            {/* Auto-rollback özel uyarısı */}
+                                            {autoRolledBack && (
+                                              <div
+                                                className="mt-2 rounded-lg px-3 py-2 text-[11px]"
+                                                style={{
+                                                  background:
+                                                    "rgba(239,68,68,0.08)",
+                                                  border:
+                                                    "1px solid rgba(239,68,68,0.25)",
+                                                  color: "#ef4444",
+                                                }}
+                                              >
+                                                🤖 <b>Auto-rollback</b>: Error
+                                                eşiği aşıldı, schedule otomatik
+                                                geri alındı.
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      }
+
+                                      const status = sched.status;
+                                      const stStyle = scheduleStatusStyle(status);
+                                      const currentStep =
+                                        sched.steps.find(
+                                          (s) =>
+                                            s.stepIndex === sched.currentStepIndex
+                                        ) ?? sched.steps[0];
+                                      const totalSteps = sched.steps.length;
+                                      const progressPct =
+                                        totalSteps > 0
+                                          ? ((sched.currentStepIndex + 1) /
+                                              totalSteps) *
+                                            100
+                                          : 0;
+
+                                      return (
+                                        <div
+                                          className="mx-4 mb-4 mt-2 rounded-xl px-4 py-3"
+                                          style={{
+                                            background: "var(--input-bg)",
+                                            border: "1px solid var(--input-border)",
+                                          }}
+                                        >
+                                          {/* Header */}
+                                          <div className="flex items-center justify-between mb-2.5">
+                                            <div className="flex items-center gap-2">
+                                              <svg
+                                                className="w-3.5 h-3.5"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                viewBox="0 0 24 24"
+                                                style={{ color: "#60a5fa" }}
+                                              >
+                                                <path
+                                                  strokeLinecap="round"
+                                                  strokeLinejoin="round"
+                                                  strokeWidth={2}
+                                                  d="M13 7l5 5m0 0l-5 5m5-5H6"
+                                                />
+                                              </svg>
+                                              <span
+                                                className="text-xs font-bold"
+                                                style={{
+                                                  color: "var(--text-primary)",
+                                                }}
+                                              >
+                                                Rollout Schedule
+                                              </span>
+                                              {sched.targetVariantKey && (
+                                                <span
+                                                  className="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold"
+                                                  style={{
+                                                    background:
+                                                      "rgba(168,85,247,0.12)",
+                                                    color: "#a855f7",
+                                                  }}
+                                                >
+                                                  → {sched.targetVariantKey}
+                                                </span>
+                                              )}
+                                              <span
+                                                className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase"
+                                                style={{
+                                                  background: stStyle.bg,
+                                                  color: stStyle.color,
+                                                }}
+                                              >
+                                                {stStyle.label}
+                                              </span>
+                                              {sched.errorThreshold &&
+                                                sched.errorThreshold > 0 && (
+                                                  <span
+                                                    className="text-[10px] px-1.5 py-0.5 rounded font-semibold flex items-center gap-1"
+                                                    style={{
+                                                      background:
+                                                        "rgba(59,130,246,0.10)",
+                                                      color: "#60a5fa",
+                                                    }}
+                                                    title={`${sched.errorThreshold}+ ${sched.minSeverity ?? "Error"} / ${sched.errorWindowMinutes ?? 10}dk → auto-rollback`}
+                                                  >
+                                                    🛡 {sched.errorThreshold}/
+                                                    {sched.errorWindowMinutes ?? 10}dk
+                                                  </span>
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-1">
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  fetchSchedule(featureFlagEnvId)
+                                                }
+                                                title="Schedule durumunu yenile"
+                                                aria-label="Yenile"
+                                                className="text-[10px] px-2 py-1 rounded font-semibold flex items-center gap-1"
+                                                style={{
+                                                  background: "var(--bg-page)",
+                                                  color: "var(--text-muted)",
+                                                  border: "1px solid var(--input-border)",
+                                                }}
+                                              >
+                                                <svg
+                                                  className="w-3 h-3"
+                                                  fill="none"
+                                                  stroke="currentColor"
+                                                  viewBox="0 0 24 24"
+                                                >
+                                                  <path
+                                                    strokeLinecap="round"
+                                                    strokeLinejoin="round"
+                                                    strokeWidth={2.5}
+                                                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                                                  />
+                                                </svg>
+                                              </button>
+                                              {status === "Active" && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    handleScheduleAction(
+                                                      sched.id,
+                                                      featureFlagEnvId,
+                                                      "pause"
+                                                    )
+                                                  }
+                                                  className="text-[10px] px-2 py-1 rounded font-semibold"
+                                                  style={{
+                                                    background:
+                                                      "rgba(245,158,11,0.12)",
+                                                    color: "#f59e0b",
+                                                  }}
+                                                >
+                                                  Pause
+                                                </button>
+                                              )}
+                                              {status === "Paused" && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    handleScheduleAction(
+                                                      sched.id,
+                                                      featureFlagEnvId,
+                                                      "resume"
+                                                    )
+                                                  }
+                                                  className="text-[10px] px-2 py-1 rounded font-semibold"
+                                                  style={{
+                                                    background:
+                                                      "rgba(16,185,129,0.12)",
+                                                    color: "#10b981",
+                                                  }}
+                                                >
+                                                  Resume
+                                                </button>
+                                              )}
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  handleScheduleAction(
+                                                    sched.id,
+                                                    featureFlagEnvId,
+                                                    "rollback"
+                                                  )
+                                                }
+                                                className="text-[10px] px-2 py-1 rounded font-semibold"
+                                                style={{
+                                                  background:
+                                                    "rgba(239,68,68,0.12)",
+                                                  color: "#ef4444",
+                                                }}
+                                              >
+                                                Geri Al
+                                              </button>
+                                            </div>
+                                          </div>
+
+                                          {/* Steps with progress */}
+                                          <div className="flex items-center gap-1 mb-2">
+                                            {sched.steps.map((step, si) => {
+                                              const isCurrent =
+                                                step.stepIndex ===
+                                                sched.currentStepIndex;
+                                              const isPassed =
+                                                step.stepIndex <
+                                                sched.currentStepIndex;
+                                              return (
+                                                <div
+                                                  key={si}
+                                                  className="flex-1 flex flex-col items-center gap-1"
+                                                >
+                                                  <div
+                                                    className="h-1.5 w-full rounded-full"
+                                                    style={{
+                                                      background: isPassed
+                                                        ? "#10b981"
+                                                        : isCurrent
+                                                        ? "#60a5fa"
+                                                        : "var(--bg-page)",
+                                                    }}
+                                                  />
+                                                  <span
+                                                    className="text-[10px] font-mono font-bold"
+                                                    style={{
+                                                      color: isCurrent
+                                                        ? "#60a5fa"
+                                                        : isPassed
+                                                        ? "#10b981"
+                                                        : "var(--text-faint)",
+                                                    }}
+                                                  >
+                                                    %{step.percentage}
+                                                  </span>
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+
+                                          {/* Status line */}
+                                          <div
+                                            className="text-[11px] flex items-center justify-between"
+                                            style={{
+                                              color: "var(--text-muted)",
+                                            }}
+                                          >
+                                            <span>
+                                              Aşama {sched.currentStepIndex + 1}/
+                                              {totalSteps} · %
+                                              {currentStep?.percentage ?? 0}
+                                            </span>
+                                            {status === "Active" &&
+                                              sched.lastTransitionAt &&
+                                              currentStep &&
+                                              currentStep.stepIndex <
+                                                totalSteps - 1 &&
+                                              (() => {
+                                                const nextAt = new Date(
+                                                  sched.lastTransitionAt
+                                                );
+                                                nextAt.setMinutes(
+                                                  nextAt.getMinutes() +
+                                                    currentStep.durationMinutes
+                                                );
+                                                return (
+                                                  <span>
+                                                    Sonraki promote:{" "}
+                                                    <span
+                                                      style={{
+                                                        color:
+                                                          "var(--text-primary)",
+                                                      }}
+                                                    >
+                                                      {formatRelativeFromNow(
+                                                        nextAt.toISOString()
+                                                      )}
+                                                    </span>
+                                                  </span>
+                                                );
+                                              })()}
+                                            {status === "Paused" && (
+                                              <span style={{ color: "#f59e0b" }}>
+                                                Duraklatıldı · Resume bekliyor
+                                              </span>
+                                            )}
+                                            {totalSteps > 0 &&
+                                              sched.currentStepIndex ===
+                                                totalSteps - 1 && (
+                                                <span style={{ color: "#60a5fa" }}>
+                                                  Son aşamada
+                                                </span>
+                                              )}
+                                          </div>
+                                          <div
+                                            className="h-1 rounded-full mt-2"
+                                            style={{ background: "var(--bg-page)" }}
+                                          >
+                                            <div
+                                              className="h-full rounded-full transition-all"
+                                              style={{
+                                                width: `${progressPct}%`,
+                                                background:
+                                                  status === "Paused"
+                                                    ? "#f59e0b"
+                                                    : "#60a5fa",
+                                              }}
+                                            />
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
                                   </div>
                                 );
                               })}
@@ -3999,6 +4664,428 @@ export default function FlagsPage() {
         );
       })()}
 
+      {/* ══════ Rollout Schedule Create Modal ══════ */}
+      {scheduleModal.open && (() => {
+        const isMulti =
+          scheduleModal.flagType === 2 ||
+          scheduleModal.flagType === "Multivariant";
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div
+              className="absolute inset-0"
+              style={{ background: "rgba(0,0,0,0.6)" }}
+              onClick={() => setScheduleModal(CLOSED_SCHEDULE_MODAL)}
+            />
+            <div
+              className="relative w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden"
+              style={{
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--input-border)",
+              }}
+            >
+              {/* Header */}
+              <div
+                className="flex items-center justify-between px-6 py-4"
+                style={{ borderBottom: "1px solid var(--divider)" }}
+              >
+                <div>
+                  <h3
+                    className="text-sm font-bold"
+                    style={{ color: "var(--text-primary)" }}
+                  >
+                    Rollout Schedule Oluştur
+                  </h3>
+                  <p
+                    className="text-xs font-mono"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    {scheduleModal.flagKey}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setScheduleModal(CLOSED_SCHEDULE_MODAL)}
+                  aria-label="Kapat"
+                  className="w-8 h-8 flex items-center justify-center rounded-lg"
+                  style={{
+                    background: "var(--input-bg)",
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="px-6 py-5">
+                {/* Target variant — multivariant'ta */}
+                {isMulti && (
+                  <div className="mb-4">
+                    <label
+                      className="text-[11px] font-semibold uppercase tracking-widest block mb-1.5"
+                      style={{ color: "var(--text-faint)" }}
+                    >
+                      Promote Edilen Variant
+                    </label>
+                    <select
+                      value={scheduleModal.targetVariantId}
+                      onChange={(e) =>
+                        setScheduleModal((p) => ({
+                          ...p,
+                          targetVariantId: e.target.value,
+                        }))
+                      }
+                      className="w-full text-sm px-3 py-2 rounded-lg font-mono"
+                      style={{
+                        background: "var(--input-bg)",
+                        color: "var(--text-primary)",
+                        border: "1px solid var(--input-border)",
+                      }}
+                    >
+                      {scheduleModal.variants.map((v) => {
+                        const id = (v.id ??
+                          (v as { Id?: string })["Id"]) as string | undefined;
+                        const key = (v.key ??
+                          (v as { Key?: string })["Key"]) as string | undefined;
+                        return (
+                          <option key={id ?? key} value={id ?? ""}>
+                            {key ?? "?"}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                )}
+
+                {/* Steps */}
+                <div className="mb-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <label
+                      className="text-[11px] font-semibold uppercase tracking-widest"
+                      style={{ color: "var(--text-faint)" }}
+                    >
+                      Adımlar
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setScheduleModal((p) => ({
+                          ...p,
+                          steps: [
+                            ...p.steps,
+                            {
+                              percentage:
+                                (p.steps[p.steps.length - 1]?.percentage ?? 0) +
+                                10,
+                              durationMinutes: 60,
+                            },
+                          ],
+                        }))
+                      }
+                      className="text-[11px] px-2 py-1 rounded font-semibold"
+                      style={{
+                        background: "rgba(59,130,246,0.12)",
+                        color: "#60a5fa",
+                      }}
+                    >
+                      + Adım
+                    </button>
+                  </div>
+
+                  <div className="space-y-2">
+                    {scheduleModal.steps.map((step, si) => {
+                      const isLast = si === scheduleModal.steps.length - 1;
+                      return (
+                        <div
+                          key={si}
+                          className="flex items-center gap-2 rounded-lg px-3 py-2"
+                          style={{
+                            background: "var(--input-bg)",
+                            border: "1px solid var(--input-border)",
+                          }}
+                        >
+                          <span
+                            className="text-[10px] font-mono font-bold"
+                            style={{ color: "var(--text-faint)", width: 18 }}
+                          >
+                            {si + 1}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={step.percentage}
+                              onChange={(e) => {
+                                const v = parseInt(e.target.value, 10) || 0;
+                                setScheduleModal((p) => ({
+                                  ...p,
+                                  steps: p.steps.map((s, i) =>
+                                    i === si
+                                      ? { ...s, percentage: Math.min(100, Math.max(0, v)) }
+                                      : s
+                                  ),
+                                }));
+                              }}
+                              className="w-14 text-xs px-2 py-1 rounded font-mono text-right"
+                              style={{
+                                background: "var(--bg-page)",
+                                color: "var(--text-primary)",
+                                border: "1px solid var(--input-border)",
+                              }}
+                            />
+                            <span
+                              className="text-xs"
+                              style={{ color: "var(--text-faint)" }}
+                            >
+                              %
+                            </span>
+                          </div>
+                          <div
+                            className="flex items-center gap-1 ml-auto"
+                            style={{
+                              opacity: isLast ? 0.4 : 1,
+                            }}
+                            title={isLast ? "Son adımda süre kullanılmaz" : ""}
+                          >
+                            <input
+                              type="number"
+                              min={0}
+                              value={step.durationMinutes}
+                              disabled={isLast}
+                              onChange={(e) => {
+                                const v = parseInt(e.target.value, 10) || 0;
+                                setScheduleModal((p) => ({
+                                  ...p,
+                                  steps: p.steps.map((s, i) =>
+                                    i === si
+                                      ? { ...s, durationMinutes: Math.max(0, v) }
+                                      : s
+                                  ),
+                                }));
+                              }}
+                              className="w-20 text-xs px-2 py-1 rounded font-mono text-right disabled:opacity-50"
+                              style={{
+                                background: "var(--bg-page)",
+                                color: "var(--text-primary)",
+                                border: "1px solid var(--input-border)",
+                              }}
+                            />
+                            <span
+                              className="text-xs"
+                              style={{ color: "var(--text-faint)" }}
+                            >
+                              dk ({formatDurationMinutes(step.durationMinutes)})
+                            </span>
+                          </div>
+                          {scheduleModal.steps.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setScheduleModal((p) => ({
+                                  ...p,
+                                  steps: p.steps.filter((_, i) => i !== si),
+                                }))
+                              }
+                              className="text-[11px] text-red-400 hover:opacity-80 ml-1"
+                              aria-label="Adımı sil"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p
+                    className="text-[10px] mt-2"
+                    style={{ color: "var(--text-faint)" }}
+                  >
+                    Adımlar artan yüzdeyle sıralanmalı. Son adımın süresi
+                    kullanılmaz.
+                  </p>
+                </div>
+
+                {/* Auto-rollback guardrail (Seviye 2) */}
+                <div
+                  className="mb-4 rounded-xl px-3 py-3"
+                  style={{
+                    background: "var(--input-bg)",
+                    border: "1px solid var(--input-border)",
+                  }}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <label
+                      className="text-[11px] font-semibold uppercase tracking-widest"
+                      style={{ color: "var(--text-faint)" }}
+                    >
+                      Auto-Rollback Guardrail (opsiyonel)
+                    </label>
+                    <label className="flex items-center gap-2 text-[11px] cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={scheduleModal.errorThreshold > 0}
+                        onChange={(e) =>
+                          setScheduleModal((p) => ({
+                            ...p,
+                            errorThreshold: e.target.checked ? 10 : 0,
+                          }))
+                        }
+                      />
+                      <span style={{ color: "var(--text-muted)" }}>
+                        Aktif
+                      </span>
+                    </label>
+                  </div>
+
+                  {scheduleModal.errorThreshold > 0 ? (
+                    <>
+                      <div className="grid grid-cols-3 gap-2 items-end">
+                        <div>
+                          <label
+                            className="text-[10px] uppercase tracking-wider block mb-1"
+                            style={{ color: "var(--text-faint)" }}
+                          >
+                            Max Errors
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={scheduleModal.errorThreshold}
+                            onChange={(e) =>
+                              setScheduleModal((p) => ({
+                                ...p,
+                                errorThreshold: Math.max(
+                                  1,
+                                  parseInt(e.target.value, 10) || 1
+                                ),
+                              }))
+                            }
+                            className="w-full text-sm px-2 py-1.5 rounded font-mono"
+                            style={{
+                              background: "var(--bg-page)",
+                              color: "var(--text-primary)",
+                              border: "1px solid var(--input-border)",
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label
+                            className="text-[10px] uppercase tracking-wider block mb-1"
+                            style={{ color: "var(--text-faint)" }}
+                          >
+                            Pencere (dk)
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={scheduleModal.errorWindowMinutes}
+                            onChange={(e) =>
+                              setScheduleModal((p) => ({
+                                ...p,
+                                errorWindowMinutes: Math.max(
+                                  1,
+                                  parseInt(e.target.value, 10) || 1
+                                ),
+                              }))
+                            }
+                            className="w-full text-sm px-2 py-1.5 rounded font-mono"
+                            style={{
+                              background: "var(--bg-page)",
+                              color: "var(--text-primary)",
+                              border: "1px solid var(--input-border)",
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label
+                            className="text-[10px] uppercase tracking-wider block mb-1"
+                            style={{ color: "var(--text-faint)" }}
+                          >
+                            Min Severity
+                          </label>
+                          <select
+                            value={scheduleModal.minSeverity}
+                            onChange={(e) =>
+                              setScheduleModal((p) => ({
+                                ...p,
+                                minSeverity: e.target
+                                  .value as ScheduleModal["minSeverity"],
+                              }))
+                            }
+                            className="w-full text-sm px-2 py-1.5 rounded"
+                            style={{
+                              background: "var(--bg-page)",
+                              color: "var(--text-primary)",
+                              border: "1px solid var(--input-border)",
+                            }}
+                          >
+                            <option value="Info">Info</option>
+                            <option value="Warning">Warning</option>
+                            <option value="Error">Error</option>
+                            <option value="Critical">Critical</option>
+                          </select>
+                        </div>
+                      </div>
+                      <p
+                        className="text-[10px] mt-2"
+                        style={{ color: "var(--text-faint)" }}
+                      >
+                        Son {scheduleModal.errorWindowMinutes} dk içinde{" "}
+                        {scheduleModal.minSeverity} ve üstü{" "}
+                        <b>{scheduleModal.errorThreshold}+</b> error gelirse →
+                        otomatik rollback.
+                      </p>
+                    </>
+                  ) : (
+                    <p
+                      className="text-[11px]"
+                      style={{ color: "var(--text-faint)" }}
+                    >
+                      External monitoring tool'lardan (Sentry, vs.){" "}
+                      <code className="font-mono">/api/track/errors</code>{" "}
+                      endpoint'ine error gelirse, bu eşik aşıldığında schedule
+                      otomatik rollback olur.
+                    </p>
+                  )}
+                </div>
+
+                {scheduleModal.error && (
+                  <p
+                    className="text-xs mb-3"
+                    style={{ color: "#ef4444" }}
+                  >
+                    {scheduleModal.error}
+                  </p>
+                )}
+
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setScheduleModal(CLOSED_SCHEDULE_MODAL)}
+                    className="flex-1 py-2.5 rounded-xl text-sm font-medium"
+                    style={{
+                      background: "var(--input-bg)",
+                      color: "var(--text-muted)",
+                      border: "1px solid var(--input-border)",
+                    }}
+                  >
+                    İptal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCreateSchedule}
+                    disabled={scheduleModal.saving}
+                    className="flex-1 btn-primary py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {scheduleModal.saving ? "Kaydediliyor…" : "Schedule Başlat"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ══════ Analytics Modal ══════ */}
       {analyticsModal.open && (() => {
         const exposureData = analyticsModal.exposureData;
@@ -4094,8 +5181,14 @@ export default function FlagsPage() {
                   border: "1px solid var(--input-border)",
                 }}
               >
-                {(["exposure", "conversion"] as AnalyticsView[]).map((v) => {
+                {(["exposure", "conversion", "timeline"] as AnalyticsView[]).map((v) => {
                   const active = analyticsModal.view === v;
+                  const label =
+                    v === "exposure"
+                      ? "Exposure"
+                      : v === "conversion"
+                      ? "Conversion"
+                      : "Timeline";
                   return (
                     <button
                       key={v}
@@ -4122,7 +5215,7 @@ export default function FlagsPage() {
                           : "none",
                       }}
                     >
-                      {v === "exposure" ? "Exposure" : "Conversion"}
+                      {label}
                     </button>
                   );
                 })}
@@ -4173,6 +5266,7 @@ export default function FlagsPage() {
                     </label>
                     <input
                       type="text"
+                      list={`events-${analyticsModal.flagId}`}
                       value={analyticsModal.eventName}
                       onChange={(e) =>
                         setAnalyticsModal((p) => ({
@@ -4199,6 +5293,11 @@ export default function FlagsPage() {
                         width: 180,
                       }}
                     />
+                    <datalist id={`events-${analyticsModal.flagId}`}>
+                      {analyticsModal.availableEvents.map((e) => (
+                        <option key={e.eventName} value={e.eventName} />
+                      ))}
+                    </datalist>
                     <button
                       type="button"
                       onClick={() =>
@@ -4225,6 +5324,55 @@ export default function FlagsPage() {
                   </div>
                 )}
               </div>
+
+              {/* Önerilen event'ler (auto-discovery chip'leri) */}
+              {analyticsModal.view === "conversion" &&
+                analyticsModal.eventsLoaded &&
+                analyticsModal.availableEvents.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 px-6 pt-2">
+                    <span
+                      className="text-[10px] font-semibold uppercase tracking-wider"
+                      style={{ color: "var(--text-faint)" }}
+                    >
+                      Önerilen:
+                    </span>
+                    {analyticsModal.availableEvents.slice(0, 8).map((e) => {
+                      const active = analyticsModal.eventName === e.eventName;
+                      return (
+                        <button
+                          key={e.eventName}
+                          type="button"
+                          onClick={() =>
+                            fetchAnalytics(
+                              analyticsModal.flagId,
+                              "conversion",
+                              analyticsModal.rangeKey,
+                              e.eventName
+                            )
+                          }
+                          disabled={analyticsModal.loading}
+                          className="text-[11px] px-2 py-0.5 rounded-md font-mono transition-all hover:opacity-80 disabled:opacity-50"
+                          style={{
+                            background: active
+                              ? "rgba(59,130,246,0.18)"
+                              : "var(--input-bg)",
+                            color: active ? "#60a5fa" : "var(--text-muted)",
+                            border: `1px solid ${
+                              active
+                                ? "rgba(59,130,246,0.3)"
+                                : "var(--input-border)"
+                            }`,
+                          }}
+                        >
+                          {e.eventName}{" "}
+                          <span style={{ opacity: 0.5 }}>
+                            ({e.count.toLocaleString("tr-TR")})
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
 
               {/* Body */}
               <div className="px-6 py-5 max-h-[60vh] overflow-y-auto">
@@ -4380,6 +5528,210 @@ export default function FlagsPage() {
                           );
                         })}
                       </div>
+                    </>
+                  )
+                ) : analyticsModal.view === "timeline" ? (
+                  /* ─── TIMELINE VIEW ─── */
+                  !analyticsModal.timelineData ||
+                  analyticsModal.timelineData.buckets.length === 0 ? (
+                    <p
+                      className="text-sm py-8 text-center"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Bu aralıkta exposure event yok.
+                    </p>
+                  ) : (
+                    <>
+                      {/* Legend */}
+                      <div className="flex flex-wrap gap-3 mb-4">
+                        {analyticsModal.timelineData.variants.map((v) => {
+                          const hue = outcomeHue(
+                            analyticsModal.timelineData!.variants,
+                            v.variantId,
+                            v.isOn
+                          );
+                          const isOff = !v.variantKey && !v.isOn;
+                          return (
+                            <div
+                              key={`${v.variantId ?? "null"}-${v.isOn}`}
+                              className="flex items-center gap-1.5 text-xs"
+                            >
+                              <span
+                                className="w-2.5 h-2.5 rounded-full"
+                                style={{
+                                  background: isOff
+                                    ? "#64748b"
+                                    : `hsl(${hue},65%,55%)`,
+                                }}
+                              />
+                              <span
+                                className="font-mono"
+                                style={{ color: "var(--text-primary)" }}
+                              >
+                                {outcomeLabel(v.variantKey, v.isOn)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* SVG line chart */}
+                      {(() => {
+                        const tl = analyticsModal.timelineData!;
+                        const width = 600;
+                        const height = 240;
+                        const padL = 36;
+                        const padR = 12;
+                        const padT = 8;
+                        const padB = 28;
+                        const innerW = width - padL - padR;
+                        const innerH = height - padT - padB;
+
+                        // Tüm değerleri tarayıp max bul.
+                        let maxY = 1;
+                        for (const b of tl.buckets) {
+                          for (const bv of b.variants) {
+                            if (bv.exposures > maxY) maxY = bv.exposures;
+                          }
+                        }
+
+                        const n = tl.buckets.length;
+                        const xStep = n > 1 ? innerW / (n - 1) : 0;
+
+                        // Variant başına nokta dizisi.
+                        const lines = tl.variants.map((v) => {
+                          const points = tl.buckets.map((b, i) => {
+                            const bv = b.variants.find(
+                              (x) =>
+                                (x.variantId ?? null) ===
+                                  (v.variantId ?? null) &&
+                                x.isOn === v.isOn
+                            );
+                            const count = bv?.exposures ?? 0;
+                            const x = padL + i * xStep;
+                            const y =
+                              padT +
+                              innerH -
+                              (count / maxY) * innerH;
+                            return { x, y, count };
+                          });
+                          const hue = outcomeHue(
+                            tl.variants,
+                            v.variantId,
+                            v.isOn
+                          );
+                          const isOff = !v.variantKey && !v.isOn;
+                          return {
+                            v,
+                            points,
+                            color: isOff
+                              ? "#64748b"
+                              : `hsl(${hue},65%,55%)`,
+                          };
+                        });
+
+                        // X axis label'leri: en fazla 6 etiket gösteriyoruz.
+                        const labelEvery = Math.max(1, Math.ceil(n / 6));
+                        const isDay = tl.bucketSize === "day";
+
+                        return (
+                          <svg
+                            viewBox={`0 0 ${width} ${height}`}
+                            className="w-full"
+                            style={{ overflow: "visible" }}
+                          >
+                            {/* Y axis grid lines (4 yatay çizgi) */}
+                            {[0, 0.25, 0.5, 0.75, 1].map((t) => {
+                              const y = padT + innerH - t * innerH;
+                              const value = Math.round(maxY * t);
+                              return (
+                                <g key={t}>
+                                  <line
+                                    x1={padL}
+                                    y1={y}
+                                    x2={padL + innerW}
+                                    y2={y}
+                                    stroke="var(--divider)"
+                                    strokeWidth="0.5"
+                                    strokeDasharray={t === 0 ? "" : "2,2"}
+                                  />
+                                  <text
+                                    x={padL - 6}
+                                    y={y + 3}
+                                    textAnchor="end"
+                                    fontSize="10"
+                                    fill="var(--text-faint)"
+                                  >
+                                    {value}
+                                  </text>
+                                </g>
+                              );
+                            })}
+
+                            {/* X axis labels */}
+                            {tl.buckets.map((b, i) => {
+                              if (i % labelEvery !== 0 && i !== n - 1) return null;
+                              const x = padL + i * xStep;
+                              const d = new Date(b.bucket);
+                              const lbl = isDay
+                                ? `${d.getDate()}/${d.getMonth() + 1}`
+                                : `${d.getHours().toString().padStart(2, "0")}:00`;
+                              return (
+                                <text
+                                  key={i}
+                                  x={x}
+                                  y={padT + innerH + 16}
+                                  textAnchor="middle"
+                                  fontSize="10"
+                                  fill="var(--text-faint)"
+                                >
+                                  {lbl}
+                                </text>
+                              );
+                            })}
+
+                            {/* Lines + dots */}
+                            {lines.map(({ v, points, color }) => (
+                              <g key={`${v.variantId ?? "null"}-${v.isOn}`}>
+                                {points.length > 1 && (
+                                  <polyline
+                                    points={points
+                                      .map((p) => `${p.x},${p.y}`)
+                                      .join(" ")}
+                                    fill="none"
+                                    stroke={color}
+                                    strokeWidth="2"
+                                    strokeLinejoin="round"
+                                    strokeLinecap="round"
+                                  />
+                                )}
+                                {points.map((p, i) => (
+                                  <circle
+                                    key={i}
+                                    cx={p.x}
+                                    cy={p.y}
+                                    r="2.5"
+                                    fill={color}
+                                  >
+                                    <title>
+                                      {outcomeLabel(v.variantKey, v.isOn)}:{" "}
+                                      {p.count} exposure
+                                    </title>
+                                  </circle>
+                                ))}
+                              </g>
+                            ))}
+                          </svg>
+                        );
+                      })()}
+
+                      <p
+                        className="text-[11px] mt-3 text-center"
+                        style={{ color: "var(--text-faint)" }}
+                      >
+                        Bucket: {analyticsModal.timelineData.bucketSize === "day" ? "günlük" : "saatlik"} ·{" "}
+                        {analyticsModal.timelineData.buckets.length} nokta
+                      </p>
                     </>
                   )
                 ) : /* ─── CONVERSION VIEW ─── */
@@ -4669,6 +6021,36 @@ export default function FlagsPage() {
                                     )}
                                 </div>
                               )}
+
+                              {/* Row 5: sample size hint — sadece yetersiz veri durumunda */}
+                              {hasStats &&
+                                !v.isSignificant &&
+                                v.requiredAdditionalUsers !== null &&
+                                v.requiredAdditionalUsers !== undefined &&
+                                v.requiredAdditionalUsers > 0 && (
+                                  <div
+                                    className="mt-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-mono"
+                                    style={{
+                                      background: "rgba(100,116,139,0.06)",
+                                      color: "var(--text-muted)",
+                                      border:
+                                        "1px solid var(--input-border)",
+                                    }}
+                                  >
+                                    Tahminen{" "}
+                                    <span
+                                      className="font-bold"
+                                      style={{
+                                        color: "var(--text-primary)",
+                                      }}
+                                    >
+                                      {v.requiredAdditionalUsers.toLocaleString(
+                                        "tr-TR"
+                                      )}
+                                    </span>{" "}
+                                    user/variant daha gerekli (%95 güven, %80 power için)
+                                  </div>
+                                )}
                             </div>
                           );
                         })}
