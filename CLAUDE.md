@@ -22,7 +22,7 @@ There is no test setup. `npm run lint` and a successful `npm run build` are the 
 
 ## API connection
 
-The backend base URL comes from `NEXT_PUBLIC_API_URL` (read in `lib/utils/api.ts`; the fallback is `http://localhost:8080`). `.env.local` is gitignored and must be created locally — point it at whichever backend you want. `docker-compose.yml` defaults to `http://localhost:8080`; override the env var when bringing the image up against a deployed backend (e.g. the prod Hetzner host).
+The backend base URL comes from `NEXT_PUBLIC_API_URL` (read in `lib/utils/api.ts`; the fallback is `http://localhost:8080`). For Docker, create a gitignored `.env` from `.env.example` and point it at the backend. `docker-compose.yml` reads that file for both the build and runtime environment; this matters because `NEXT_PUBLIC_*` values are embedded in the client bundle during `next build`.
 
 Auth: JWT is stored in `localStorage["token"]` after login (also `userName`, `userEmail`). `lib/utils/api.ts` attaches `Authorization: Bearer ...` when `auth=true` (the default for `api.get/post/put`). No refresh token, no automatic 401 handling — a stale token currently produces silent failures, not a redirect.
 
