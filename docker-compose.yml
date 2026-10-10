@@ -6,7 +6,7 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL must be set in .env}
     container_name: switchly-ui
     ports:
-      - "3001:3000"
+      - "${HOST_PORT:?HOST_PORT must be set in .env}:${PORT:?PORT must be set in .env}"
     env_file:
       - .env
     restart: unless-stopped

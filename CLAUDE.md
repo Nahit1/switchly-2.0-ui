@@ -22,7 +22,7 @@ There is no test setup. `npm run lint` and a successful `npm run build` are the 
 
 ## API connection
 
-The backend base URL comes from `NEXT_PUBLIC_API_URL` (read in `lib/utils/api.ts`; the fallback is `http://localhost:8080`). For Docker, create a gitignored `.env` from `.env.example` and point it at the backend. `docker-compose.yml` reads that file for both the build and runtime environment; this matters because `NEXT_PUBLIC_*` values are embedded in the client bundle during `next build`.
+The backend base URL comes from `NEXT_PUBLIC_API_URL` (read in `lib/utils/api.ts`; the fallback is `http://localhost:8080`). For Docker, create a gitignored `.env` from `.env.example` and point it at the backend. `docker-compose.yml` reads that file for both the build and runtime environment; this matters because `NEXT_PUBLIC_*` values are embedded in the client bundle during `next build`. `HOST_PORT` is the port exposed by Docker and `PORT` is the Next.js server port inside the container.
 
 Auth: JWT is stored in `localStorage["token"]` after login (also `userName`, `userEmail`). `lib/utils/api.ts` attaches `Authorization: Bearer ...` when `auth=true` (the default for `api.get/post/put`). No refresh token, no automatic 401 handling — a stale token currently produces silent failures, not a redirect.
 
