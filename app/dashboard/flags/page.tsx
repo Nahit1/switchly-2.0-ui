@@ -1883,34 +1883,6 @@ export default function FlagsPage() {
                           })
                         )}
                       </div>
-                      {/* Analytics */}
-                      <button
-                        onClick={() =>
-                          openAnalyticsModal(flagId, flagKey ?? "")
-                        }
-                        className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg font-medium transition-all hover:opacity-80 flex-shrink-0"
-                        style={{
-                          background: "rgba(59,130,246,0.1)",
-                          color: "#60a5fa",
-                        }}
-                        title="Exposure analytics"
-                      >
-                        <svg
-                          className="w-3 h-3"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2.5}
-                            d="M9 19V9m6 10V5m-12 14h18"
-                          />
-                        </svg>
-                        Analytics
-                      </button>
-
                       {/* Ayrıntılar */}
                       <button
                         onClick={() => toggleExpand(flagId)}
@@ -2561,28 +2533,6 @@ export default function FlagsPage() {
                                         return (
                                           <div className="px-4 pb-4">
                                             <div className="flex items-center flex-wrap gap-2">
-                                              <button
-                                                type="button"
-                                                onClick={() =>
-                                                  openCreateScheduleModal(
-                                                    flagId,
-                                                    flagKey ?? "",
-                                                    featureFlagEnvId,
-                                                    flagType ?? 1,
-                                                    varList
-                                                  )
-                                                }
-                                                className="text-[11px] px-2.5 py-1 rounded-md font-semibold"
-                                                style={{
-                                                  background:
-                                                    "rgba(59,130,246,0.10)",
-                                                  color: "#60a5fa",
-                                                  border:
-                                                    "1px solid rgba(59,130,246,0.20)",
-                                                }}
-                                              >
-                                                + Rollout Schedule
-                                              </button>
                                               {sched && (
                                                 <span
                                                   className="text-[10px] px-1.5 py-0.5 rounded font-semibold"

@@ -161,7 +161,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <p className="px-3 mb-2 text-[12px] font-semibold uppercase tracking-widest" style={{ color: "var(--text-faint)" }}>
           Menü
         </p>
-        {navItems.map((item) => {
+        {navItems.filter((item) => item.href !== "/dashboard/segments" && item.href !== "/dashboard/settings").map((item) => {
           const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(item.href));
           // Lock all nav items except organizations when no org
           const disabled = !hasOrg && item.href !== ORG_PAGE;
